@@ -1,2 +1,4 @@
 .env
 config.js
+worker/.dev.vars
+*.p8
