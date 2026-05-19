@@ -34,6 +34,7 @@ jobs:
           SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
           SPOTIFY_REDIRECT_URI: ${{ vars.SPOTIFY_REDIRECT_URI }}
           APPLE_TOKEN_ENDPOINT: ${{ vars.APPLE_TOKEN_ENDPOINT }}
+          POTATUNES_API_BASE: ${{ vars.POTATUNES_API_BASE }}
           APPLE_STOREFRONT_ID: ${{ vars.APPLE_STOREFRONT_ID }}
         run: |
           rm -rf dist

@@ -167,6 +167,88 @@ button:disabled {
   gap: 10px;
 }
 
+.top-account {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 38px;
+  max-width: min(42vw, 360px);
+  padding: 5px 10px 5px 6px;
+  border: 1px solid rgba(232, 201, 141, 0.9);
+  border-radius: 999px;
+  background: rgba(255, 253, 248, 0.84);
+  color: var(--ink);
+  box-shadow: 0 10px 22px rgba(93, 59, 23, 0.08);
+}
+
+.top-account .service-icon {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+}
+
+.top-account .spotify-logo {
+  background: var(--spotify);
+}
+
+.top-account .apple-logo {
+  background: var(--apple);
+}
+
+.top-account .spotify-logo::before,
+.top-account .spotify-logo::after,
+.top-account .spotify-logo span {
+  left: 7px;
+  width: 15px;
+  height: 6px;
+  border-top-width: 2px;
+}
+
+.top-account .spotify-logo::before {
+  top: 8px;
+}
+
+.top-account .spotify-logo span {
+  top: 12px;
+  width: 13px;
+}
+
+.top-account .spotify-logo::after {
+  top: 16px;
+  width: 11px;
+}
+
+.top-account .apple-logo span {
+  top: 6px;
+  left: 14px;
+  width: 4px;
+  height: 16px;
+}
+
+.top-account .apple-logo span::before {
+  left: -8px;
+  bottom: -1px;
+  width: 11px;
+  height: 9px;
+}
+
+.top-account strong {
+  display: block;
+  overflow: hidden;
+  max-width: 100%;
+  font-size: 0.84rem;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.top-account small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.1;
+}
+
 .nav-button {
   display: inline-flex;
   align-items: center;
@@ -1009,6 +1091,10 @@ p {
   margin-top: 14px;
 }
 
+.blend-flow:empty {
+  display: none;
+}
+
 .blend-step {
   display: grid;
   gap: 7px;
@@ -1344,7 +1430,12 @@ textarea {
   }
 
   .top-actions {
+    width: 100%;
     justify-content: space-between;
+  }
+
+  .top-account {
+    max-width: calc(100vw - 86px);
   }
 
   .walkthrough-panel {

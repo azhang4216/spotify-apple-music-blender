@@ -29,7 +29,7 @@ Potatunes now has a D1-backed identity model:
 
 The same person can create multiple invite links and multiple blends with different friends. Each blend is attached to the signed-in Potatunes user session and the invite used to create it.
 
-The frontend still has compressed-link fallback code from the original static prototype. The next integration step is switching the live UI to the D1 invite/session routes.
+The frontend creates short D1-backed invite links when the Worker session is available, with the original compressed-link format kept as a fallback.
 
 ## Matching Design
 
@@ -65,6 +65,7 @@ Fill in:
 SPOTIFY_CLIENT_ID=
 SPOTIFY_REDIRECT_URI=http://localhost:4173/
 APPLE_TOKEN_ENDPOINT=http://localhost:8787/apple-music-token
+POTATUNES_API_BASE=http://localhost:8787
 APPLE_STOREFRONT_ID=us
 ```
 
@@ -180,7 +181,7 @@ The Worker API uses Potatunes bearer sessions for DB writes and private reads:
 - `POST /api/auth/apple`: verifies a MusicKit user token, upserts a user, and returns a Potatunes session.
 - `GET /api/me`: returns the signed-in Potatunes user for `Authorization: Bearer <session>`.
 - `POST /api/library-snapshots`: stores a user's provider track list.
-- `POST /api/invites`: creates a share slug for a snapshot.
+- `POST /api/invites`: creates a short share slug for a snapshot.
 - `GET /api/invites/:slug`: reads public invite metadata. Add `?tracks=true` with a session to fetch tracks.
 - `POST /api/blends`: stores a completed overlap. If the same two users already have a blend, the API returns a `409` warning until the previous blend is at least 1 week old. Send `refresh: true` to create a refreshed blend after that cooldown.
 - `GET /api/users/:id/blends`: lists a user's blends.
@@ -216,6 +217,7 @@ Set these repository variables:
 
 - `SPOTIFY_REDIRECT_URI`: `https://YOUR_USER.github.io/YOUR_REPO/`
 - `APPLE_TOKEN_ENDPOINT`: `https://YOUR_WORKER_SUBDOMAIN.workers.dev/apple-music-token`
+- `POTATUNES_API_BASE`: `https://YOUR_WORKER_SUBDOMAIN.workers.dev`
 - `APPLE_STOREFRONT_ID`: `us`
 
 Then enable Pages with **Build and deployment > Source > GitHub Actions**.

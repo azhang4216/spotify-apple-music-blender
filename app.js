@@ -1,6 +1,7 @@
 const STORAGE = {
   spotifyToken: "potatunes.spotifyToken",
   spotifyOAuth: "potatunes.spotifyOAuth",
+  potatunesAuth: "potatunes.auth",
   pendingInvite: "potatunes.pendingInvite",
   pendingInvitePayload: "potatunes.pendingInvitePayload",
   appleUserToken: "potatunes.appleUserToken",
@@ -15,6 +16,7 @@ const DEFAULT_CONFIG = {
   spotifyRedirectUri: "",
   appleDeveloperToken: "",
   appleTokenEndpoint: "",
+  apiBase: "",
   appleStorefrontId: "us",
 };
 
@@ -64,6 +66,7 @@ const state = {
   blendHistory: [],
   activeBlend: null,
   walkthroughIndex: null,
+  potatunesAuth: null,
   invitePayload: "",
   readyToMash: false,
   mashComplete: false,
@@ -105,6 +108,7 @@ document.addEventListener("DOMContentLoaded", init);
 async function init() {
   bindElements();
   state.blendHistory = loadBlendHistory();
+  state.potatunesAuth = loadPotatunesAuth();
   await loadExternalConfig();
   loadConfig();
   attachEvents();
@@ -164,6 +168,7 @@ function bindElements() {
     "stepBlend",
     "stepCollect",
     "stepConnect",
+    "topAccount",
     "walkthroughCloseButton",
     "walkthroughCopy",
     "walkthroughNextButton",
@@ -187,6 +192,13 @@ function loadConfig() {
 
   if (!state.config.spotifyRedirectUri) {
     state.config.spotifyRedirectUri = `${window.location.origin}${window.location.pathname}`;
+  }
+  if (!state.config.apiBase && state.config.appleTokenEndpoint) {
+    try {
+      state.config.apiBase = new URL(state.config.appleTokenEndpoint).origin;
+    } catch {
+      state.config.apiBase = "";
+    }
   }
 }
 
@@ -424,6 +436,7 @@ async function handleSpotifyCallback() {
   const pending = sessionStorage.getItem(STORAGE.pendingInvite);
   if (pending) state.invite = safeJsonParse(pending);
   state.invitePayload = sessionStorage.getItem(STORAGE.pendingInvitePayload) || state.invitePayload;
+  state.potatunesAuth = loadPotatunesAuth();
 
   try {
     setBusy(true, "Finishing Spotify sign-in...");
@@ -522,6 +535,7 @@ async function finishSpotifyConnection() {
 
   const accessToken = await getSpotifyAccessToken();
   state.session.profile = await fetchSpotifyProfile(accessToken);
+  await connectPotatunesSpotify(accessToken);
   const tracks = await fetchSpotifySavedTracks(accessToken);
   state.session.tracks = dedupeTracks(tracks);
 
@@ -539,6 +553,35 @@ async function fetchSpotifyProfile(accessToken) {
     id: body.id,
     url: body.external_urls?.spotify,
   };
+}
+
+async function connectPotatunesSpotify(accessToken) {
+  if (!apiBase()) return null;
+  try {
+    const body = await apiRequest("/api/auth/spotify", {
+      method: "POST",
+      body: { accessToken },
+    });
+    return savePotatunesAuth(body);
+  } catch {
+    return null;
+  }
+}
+
+async function connectPotatunesApple(musicUserToken) {
+  if (!apiBase() || !musicUserToken) return null;
+  try {
+    const body = await apiRequest("/api/auth/apple", {
+      method: "POST",
+      body: {
+        musicUserToken,
+        displayName: state.session?.profile?.name || "Apple Music listener",
+      },
+    });
+    return savePotatunesAuth(body);
+  } catch {
+    return null;
+  }
 }
 
 async function fetchSpotifySavedTracks(accessToken) {
@@ -604,6 +647,7 @@ async function connectApple() {
       profile: { name: "Apple Music listener" },
       tracks: [],
     };
+    await connectPotatunesApple(userToken || music.musicUserToken || "");
     renderCollecting("Apple Music", 0, 4);
     const tracks = await fetchAppleLibrarySongs(music);
     state.session.tracks = dedupeTracks(await preferAppleLikedTracks(tracks, music));
@@ -743,6 +787,23 @@ async function finishCollection() {
   await waitForPaint();
 
   if (state.invite) {
+    if (!state.invite.tracks?.length && state.invite.slug) {
+      setLoadingProgress("spuddySongs", 48, {
+        title: "Finding your spuddy's songs",
+        copy: "Opening the shared potato link.",
+        counter: "...",
+        showArtwork: false,
+      });
+      await waitForPaint();
+      state.invite = await fetchShortInvite(state.invite.slug, { includeTracks: true });
+      sessionStorage.setItem(STORAGE.pendingInvite, JSON.stringify(state.invite));
+      markLoadingStepDone("spuddySongs", {
+        copy: `${state.invite.tracks.length} spuddy tunes ready.`,
+        counter: String(state.invite.tracks.length),
+        showArtwork: false,
+      });
+      await waitForPaint();
+    }
     state.matches = [];
     state.activeBlend = null;
     state.shareLink = "";
@@ -786,6 +847,7 @@ async function mashInvite() {
       copy: `${state.session.tracks.length} tunes ready.`,
       counter: String(state.session.tracks.length),
       progress: 72,
+      steps: ["yourSongs", "spuddySongs", "mash", "generate"],
       showArtwork: false,
     });
     await waitForPaint();
@@ -863,6 +925,14 @@ async function ensureMyInviteLink() {
   }
 
   state.myInvite = createInviteFromSession();
+  const shortInvite = await createShortShareLink(state.myInvite);
+  if (shortInvite) {
+    state.myInvite = shortInvite.invite;
+    state.myShareLink = shortInvite.link;
+    state.invitePayload = shortInvite.invite.slug;
+    return state.myInvite;
+  }
+
   state.myShareLink = await createShareLink(state.myInvite);
   return state.myInvite;
 }
@@ -883,21 +953,82 @@ function compactTrackForInvite(track) {
   };
 }
 
+function compactTrackForSnapshot(track) {
+  return {
+    service: track.service,
+    id: track.id,
+    uri: track.uri,
+    title: track.title,
+    artists: track.artists,
+    album: track.album,
+    durationMs: track.durationMs,
+    isrc: track.isrc,
+    artworkUrl: track.artworkUrl,
+    url: track.url,
+    appleType: track.appleType,
+    catalogId: track.catalogId,
+    normTitle: track.norm.title,
+    normArtists: track.norm.artists,
+    primaryArtist: track.norm.primaryArtist,
+    strictKey: track.norm.strictKey,
+    titleKey: track.norm.titleKey,
+    versionFlags: track.norm.versionFlags,
+  };
+}
+
+async function createShortShareLink(invite) {
+  if (!state.potatunesAuth?.session?.token || !apiBase()) return null;
+
+  try {
+    const snapshotBody = await apiRequest("/api/library-snapshots", {
+      method: "POST",
+      auth: true,
+      body: {
+        provider: state.session.service,
+        sourceLabel: SERVICES[state.session.service].sourceLabel,
+        tracks: state.session.tracks.map(compactTrackForSnapshot),
+      },
+    });
+    const inviteBody = await apiRequest("/api/invites", {
+      method: "POST",
+      auth: true,
+      body: {
+        ownerSnapshotId: snapshotBody.snapshot.id,
+      },
+    });
+    const slug = inviteBody.invite.slug;
+    return {
+      invite: {
+        ...invite,
+        v: 2,
+        blendId: inviteBody.invite.id,
+        slug,
+        short: true,
+      },
+      link: routeLink(`/spuddies/${slug}`),
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function createShareLink(invite) {
   const payload = await encodeInvitePayload(invite);
-  const url = new URL(window.location.href);
-  url.search = "";
-  url.hash = `/spuddies/${payload}`;
+  const link = routeLink(`/spuddies/${payload}`);
   if (
     invite.blendId &&
     (invite.blendId === state.invite?.blendId || (!state.invite && invite.blendId === state.myInvite?.blendId))
   ) {
     state.invitePayload = payload;
   }
-  return url.toString();
+  return link;
 }
 
 async function parseInvitePayload(encoded) {
+  if (!isEncodedInvitePayload(encoded)) {
+    return await fetchShortInvite(encoded, { includeTracks: Boolean(state.potatunesAuth?.session?.token) });
+  }
+
   const invite = await decodeInvitePayload(encoded);
   if (!invite?.tracks?.length) {
     throw new Error("Invalid invite.");
@@ -913,6 +1044,55 @@ async function parseInvitePayload(encoded) {
     }),
   );
   return invite;
+}
+
+function isEncodedInvitePayload(value) {
+  return value.startsWith("gz.") || value.startsWith("b64.");
+}
+
+async function fetchShortInvite(slug, { includeTracks = false } = {}) {
+  const query = includeTracks ? "?tracks=true" : "";
+  const body = await apiRequest(`/api/invites/${encodeURIComponent(slug)}${query}`, {
+    auth: includeTracks,
+  });
+  return normalizeApiInvite(body.invite, { includeTracks });
+}
+
+function normalizeApiInvite(invite, { includeTracks = false } = {}) {
+  if (!invite?.slug) throw new Error("Invalid invite.");
+  const hostService = invite.owner?.provider || "unknown";
+  return {
+    v: 2,
+    blendId: invite.id,
+    slug: invite.slug,
+    short: true,
+    createdAt: invite.createdAt,
+    host: {
+      name: invite.owner?.displayName || "A spuddy",
+      service: hostService,
+      sourceLabel: SERVICES[hostService]?.sourceLabel || "Songs",
+      count: invite.owner?.trackCount || invite.tracks?.length || 0,
+    },
+    tracks: includeTracks
+      ? (invite.tracks || []).map((track) =>
+        toTrack({
+          ...track,
+          service: hostService,
+          id: track.providerTrackId || track.id,
+          uri: track.uri,
+          artworkUrl: track.artworkUrl || "",
+          url: track.url || "",
+        }),
+      )
+      : [],
+  };
+}
+
+function routeLink(route) {
+  const url = new URL(window.location.href);
+  url.search = "";
+  url.hash = route;
+  return url.toString();
 }
 
 async function encodeInvitePayload(invite) {
@@ -1502,6 +1682,7 @@ function startPlaylistLoading(targetService) {
     copy: `Planting in ${serviceName(targetService)}.`,
     counter: "mix",
     progress: 16,
+    steps: [],
     showArtwork: false,
   });
   markLoadingStepDone("yourSongs", { render: false });
@@ -1718,6 +1899,7 @@ async function importBlendPack(event) {
         copy: `${state.invite.tracks.length} spuddy tunes in the sack.`,
         counter: String(state.invite.tracks.length),
         progress: 65,
+        steps: ["yourSongs", "spuddySongs", "mash", "generate"],
         showArtwork: false,
       });
       markLoadingStepDone("yourSongs", {
@@ -1945,9 +2127,11 @@ function clearSession({ clearAuth = false } = {}) {
   if (clearAuth) {
     removeStoredItem(STORAGE.spotifyToken);
     removeStoredItem(STORAGE.appleUserToken);
+    removeStoredItem(STORAGE.potatunesAuth);
   }
   state.invite = null;
   state.session = null;
+  if (clearAuth) state.potatunesAuth = null;
   state.matches = [];
   state.shareLink = "";
   state.myInvite = null;
@@ -2041,6 +2225,7 @@ function restoreAppSnapshot() {
 
 function render() {
   renderConfigBadge();
+  renderTopAccount();
   renderModeBanner();
   renderPanels();
   renderInviteIntro();
@@ -2059,6 +2244,25 @@ function renderConfigBadge() {
   const hasApple = hasAppleTokenSource();
   els.configBadge.className = `status-pill ${hasSpotify && hasApple ? "ready" : "warning"}`;
   els.configBadge.textContent = hasSpotify && hasApple ? "Configured" : "Needs config";
+}
+
+function renderTopAccount() {
+  if (!state.session) {
+    els.topAccount.classList.add("hidden");
+    els.topAccount.innerHTML = "";
+    return;
+  }
+
+  const service = state.session.service;
+  const name = state.session.profile?.name || `${serviceName(service)} listener`;
+  els.topAccount.classList.remove("hidden");
+  els.topAccount.innerHTML = `
+    <span class="service-icon ${service === "spotify" ? "spotify-logo" : "apple-logo"}" aria-hidden="true"><span></span></span>
+    <span>
+      <strong>${escapeHtml(name)}</strong>
+      <small>${escapeHtml(serviceName(service))}</small>
+    </span>
+  `;
 }
 
 function renderModeBanner() {
@@ -2124,7 +2328,7 @@ function renderAccountPanel() {
   const name = state.session?.profile?.name || "Potatunes listener";
   const service = serviceName(state.session?.service);
   const count = state.session?.tracks?.length || 0;
-  els.accountSummary.textContent = `${name} - ${service} - ${count} tune${count === 1 ? "" : "s"}`;
+  els.accountSummary.textContent = `${name} (${service}) - ${count} tune${count === 1 ? "" : "s"}`;
 
   if (!state.blendHistory.length) {
     els.blendHistoryList.innerHTML = `<p class="empty-copy">No blended playlists yet.</p>`;
@@ -2304,7 +2508,8 @@ function renderCollecting(serviceNameText, count, total) {
     title: "Finding your songs",
     copy: `${serviceNameText} is digging through your saved tunes.`,
     counter: String(count),
-    showArtwork: true,
+    steps: [],
+    showArtwork: false,
   };
   updateLibraryProgress(count, total);
   render();
@@ -2333,6 +2538,7 @@ function defaultLoadingState() {
       mash: 0,
       generate: 0,
     },
+    steps: [],
     showArtwork: true,
   };
 }
@@ -2345,6 +2551,7 @@ function startLoadingFlow(stage, options = {}) {
     title: options.title || "Digging up songs",
     copy: options.copy || "A short potato pause.",
     counter: options.counter || "0",
+    steps: options.steps || [],
     showArtwork: options.showArtwork ?? true,
   };
   setLoadingProgress(stage, options.progress ?? 12, { render: false });
@@ -2364,6 +2571,7 @@ function setLoadingProgress(stage, pct, options = {}) {
   if (options.title) state.loading.title = options.title;
   if (options.copy !== undefined) state.loading.copy = options.copy;
   if (options.counter !== undefined) state.loading.counter = options.counter;
+  if (options.steps !== undefined) state.loading.steps = options.steps;
   if (options.showArtwork !== undefined) state.loading.showArtwork = options.showArtwork;
   if (options.render !== false) renderLoadingPanel();
 }
@@ -2380,11 +2588,15 @@ function renderLoadingPanel() {
   els.libraryCopy.textContent = loading.copy;
   els.libraryCounter.textContent = loading.counter;
 
-  const stepProgress = LOADING_STEPS.map((step) => loading.progress[step.id] || 0);
-  const overallPct = stepProgress.reduce((total, value) => total + value, 0) / LOADING_STEPS.length;
+  const visibleSteps = loading.steps?.length
+    ? LOADING_STEPS.filter((step) => loading.steps.includes(step.id))
+    : [];
+  const overallPct = visibleSteps.length
+    ? visibleSteps.reduce((total, step) => total + (loading.progress[step.id] || 0), 0) / visibleSteps.length
+    : loading.progress[loading.stage] || 0;
   els.progressFill.style.width = `${clamp(overallPct, loading.active ? 8 : 0, 100)}%`;
 
-  els.blendFlow.innerHTML = LOADING_STEPS.map((step) => loadingStepHtml(step, loading)).join("");
+  els.blendFlow.innerHTML = visibleSteps.map((step) => loadingStepHtml(step, loading)).join("");
 
   if (loading.showArtwork) {
     renderArtworkPreview(state.session?.tracks || []);
@@ -2492,6 +2704,53 @@ function setStoredItem(key, value) {
 function removeStoredItem(key) {
   sessionStorage.removeItem(key);
   localStorage.removeItem(key);
+}
+
+function loadPotatunesAuth() {
+  const auth = safeJsonParse(getStoredItem(STORAGE.potatunesAuth));
+  if (!auth?.session?.token || !auth?.user?.id) return null;
+  if (auth.session.expiresAt && Date.parse(auth.session.expiresAt) <= Date.now()) {
+    removeStoredItem(STORAGE.potatunesAuth);
+    return null;
+  }
+  return auth;
+}
+
+function savePotatunesAuth(auth) {
+  if (!auth?.session?.token || !auth?.user?.id) return null;
+  state.potatunesAuth = auth;
+  setStoredItem(STORAGE.potatunesAuth, JSON.stringify(auth));
+  return auth;
+}
+
+function apiBase() {
+  return String(state.config.apiBase || "").replace(/\/+$/, "");
+}
+
+async function apiRequest(path, { method = "GET", body, auth = false } = {}) {
+  const base = apiBase();
+  if (!base) throw new Error("Potatunes backend is not configured.");
+
+  const headers = {
+    Accept: "application/json",
+  };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (auth) {
+    const token = state.potatunesAuth?.session?.token;
+    if (!token) throw new Error("Potatunes session is not connected.");
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  const response = await fetch(`${base}${path}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || "Potatunes backend request failed.");
+  }
+  return data;
 }
 
 function waitFor(predicate, timeoutMs) {

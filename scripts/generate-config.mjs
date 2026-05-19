@@ -12,6 +12,7 @@ const config = {
   spotifyRedirectUri: env("SPOTIFY_REDIRECT_URI"),
   appleDeveloperToken: env("APPLE_DEVELOPER_TOKEN"),
   appleTokenEndpoint: env("APPLE_TOKEN_ENDPOINT"),
+  apiBase: env("POTATUNES_API_BASE"),
   appleStorefrontId: env("APPLE_STOREFRONT_ID") || "us",
 };
 
@@ -30,6 +31,7 @@ console.log(
       hasSpotifyRedirectUri: Boolean(config.spotifyRedirectUri),
       hasAppleDeveloperToken: Boolean(config.appleDeveloperToken),
       hasAppleTokenEndpoint: Boolean(config.appleTokenEndpoint),
+      hasApiBase: Boolean(config.apiBase),
       appleStorefrontId: config.appleStorefrontId,
     },
     null,
