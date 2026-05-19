@@ -63,6 +63,10 @@ const state = {
   blendHistory: [],
   activeBlend: null,
   walkthroughIndex: null,
+  invitePayload: "",
+  readyToMash: false,
+  mashComplete: false,
+  loading: defaultLoadingState(),
 };
 
 const WALKTHROUGH_STEPS = [
@@ -86,6 +90,13 @@ const WALKTHROUGH_STEPS = [
   },
 ];
 
+const LOADING_STEPS = [
+  { id: "yourSongs", label: "finding your songs" },
+  { id: "spuddySongs", label: "finding your spuddy's songs" },
+  { id: "mash", label: "mashing the potato overlaps" },
+  { id: "generate", label: "generating" },
+];
+
 const els = {};
 
 document.addEventListener("DOMContentLoaded", init);
@@ -96,7 +107,7 @@ async function init() {
   await loadExternalConfig();
   loadConfig();
   attachEvents();
-  loadInviteFromLocation();
+  await loadRouteFromLocation();
 
   const handledSpotifyCallback = await handleSpotifyCallback();
   if (!handledSpotifyCallback) {
@@ -110,10 +121,9 @@ function bindElements() {
     "accountSummary",
     "appleButton",
     "blendHistoryList",
+    "blendFlow",
     "configBadge",
-    "connectCopy",
     "connectPanel",
-    "connectTitle",
     "copyInviteButton",
     "copyMyInviteButton",
     "demoButton",
@@ -122,6 +132,9 @@ function bindElements() {
     "homeButton",
     "importButton",
     "importFile",
+    "inviteIntro",
+    "inviteIntroCopy",
+    "inviteIntroTitle",
     "inviteCopy",
     "inviteCount",
     "inviteLink",
@@ -134,6 +147,7 @@ function bindElements() {
     "logoutButton",
     "matchCount",
     "matchList",
+    "mashButton",
     "modeBanner",
     "progressFill",
     "resetButton",
@@ -156,6 +170,9 @@ function bindElements() {
     "walkthroughStep",
     "walkthroughTitle",
     "walkthroughVisual",
+    "verifiedCopy",
+    "verifiedPanel",
+    "verifiedTitle",
   ].forEach((id) => {
     els[id] = document.getElementById(id);
   });
@@ -197,15 +214,31 @@ function attachEvents() {
   els.appleExportButton.addEventListener("click", () => createPlaylist("apple"));
   els.resetButton.addEventListener("click", goHome);
   els.copyMyInviteButton.addEventListener("click", copyMyInviteLink);
+  els.mashButton.addEventListener("click", mashInvite);
   els.logoutButton.addEventListener("click", logout);
   els.blendHistoryList.addEventListener("click", openBlendHistory);
   els.walkthroughNextButton.addEventListener("click", advanceWalkthrough);
   els.walkthroughCloseButton.addEventListener("click", goHome);
+  window.addEventListener("hashchange", () => {
+    if (state.busy) return;
+    loadRouteFromLocation({ fromNavigation: true }).then(() => render());
+  });
 }
 
-function loadInviteFromLocation() {
-  const hash = window.location.hash.replace(/^#/, "");
-  if (!hash) {
+async function loadRouteFromLocation({ fromNavigation = false } = {}) {
+  const route = parseCurrentRoute();
+
+  if (fromNavigation && route.screen === "home") {
+    clearSession();
+    return;
+  }
+
+  if (route.screen === "walkthrough") {
+    state.walkthroughIndex = 0;
+    return;
+  }
+
+  if (!route.payload) {
     const pending = sessionStorage.getItem(STORAGE.pendingInvite);
     if (pending) {
       state.invite = safeJsonParse(pending);
@@ -213,20 +246,85 @@ function loadInviteFromLocation() {
     return;
   }
 
-  const params = new URLSearchParams(hash);
-  const encodedInvite = params.get("join");
-  if (!encodedInvite) return;
+  try {
+    const invite = await parseInvitePayload(route.payload);
+    state.invite = invite;
+    state.invitePayload = route.payload;
+    state.shareLink = "";
+    state.activeBlend = null;
+    if (route.screen === "results" && state.session?.tracks?.length) {
+      state.matches = matchTracks(state.invite.tracks, state.session.tracks);
+      state.readyToMash = false;
+      state.mashComplete = true;
+    } else {
+      state.matches = [];
+      state.readyToMash = Boolean(state.session?.tracks?.length);
+      state.mashComplete = false;
+    }
+    sessionStorage.setItem(STORAGE.pendingInvite, JSON.stringify(invite));
+    normalizeRoute();
+  } catch {
+    setStatus("That spud link could not be opened. Try importing a sack instead.", "error");
+  }
+}
 
-  parseInvitePayload(encodedInvite)
-    .then((invite) => {
-      state.invite = invite;
-      sessionStorage.setItem(STORAGE.pendingInvite, JSON.stringify(invite));
-      render();
-    })
-    .catch(() => {
-      setStatus("That spud link could not be opened. Try importing a sack instead.", "error");
-      render();
-    });
+function parseCurrentRoute() {
+  const rawHash = window.location.hash.replace(/^#/, "");
+  if (!rawHash || rawHash === "/") return { screen: "home", payload: "" };
+
+  if (rawHash.startsWith("join=")) {
+    const params = new URLSearchParams(rawHash);
+    return { screen: "join", payload: params.get("join") || "" };
+  }
+
+  const route = rawHash.startsWith("/") ? rawHash : `/${rawHash}`;
+  const parts = route.split("/").filter(Boolean);
+  if (parts[0] === "how-it-works") return { screen: "walkthrough", payload: "" };
+  if (parts[0] === "spuddies" && parts[1]) {
+    return {
+      screen: parts[2] || "join",
+      payload: parts[1],
+    };
+  }
+  if (parts[0] === "share") return { screen: "share", payload: "" };
+  if (parts[0] === "results") return { screen: "results", payload: "" };
+  return { screen: "home", payload: "" };
+}
+
+function normalizeRoute() {
+  const next = routeForState();
+  setRoute(next, { replace: true });
+}
+
+function routeForState() {
+  if (state.walkthroughIndex !== null) return "/how-it-works";
+
+  const inviteRoute = inviteRoutePath();
+  if (state.busy && state.loading.active) {
+    return inviteRoute && state.session ? `${inviteRoute}/mashing` : "/loading";
+  }
+  if (state.invite && !state.session) return inviteRoute || "/spuddies";
+  if (state.readyToMash && state.invite && state.session) return inviteRoute ? `${inviteRoute}/verified` : "/verified";
+  if (state.mashComplete && state.invite && state.session && !state.shareLink) {
+    return inviteRoute ? `${inviteRoute}/results` : "/results";
+  }
+  if (state.matches.length > 0) return "/results";
+  if (state.shareLink) return "/share";
+  if (state.session) return "/account";
+  return "/";
+}
+
+function inviteRoutePath(payload = state.invitePayload) {
+  return payload ? `/spuddies/${payload}` : "";
+}
+
+function setRoute(route, { replace = true } = {}) {
+  const hash = route.startsWith("/") ? route : `/${route}`;
+  const nextUrl = `${window.location.pathname}#${hash}`;
+  const currentUrl = `${window.location.pathname}${window.location.hash}`;
+  if (nextUrl === currentUrl) return;
+  const method = replace ? "replaceState" : "pushState";
+  window.history[method](null, "", nextUrl);
 }
 
 async function connectService(service) {
@@ -238,6 +336,18 @@ async function connectService(service) {
       return;
     }
     sessionStorage.setItem(STORAGE.pendingInvite, JSON.stringify(state.invite));
+    if (getStoredItem(STORAGE.spotifyToken)) {
+      try {
+        setBusy(true);
+        await finishSpotifyConnection();
+        return;
+      } catch {
+        removeStoredItem(STORAGE.spotifyToken);
+      } finally {
+        setBusy(false);
+        render();
+      }
+    }
     await beginSpotifyAuth("collect");
     return;
   }
@@ -353,7 +463,7 @@ async function exchangeSpotifyCode(code, oauth) {
 }
 
 function saveSpotifyToken(token) {
-  sessionStorage.setItem(
+  setStoredItem(
     STORAGE.spotifyToken,
     JSON.stringify({
       accessToken: token.access_token,
@@ -365,7 +475,7 @@ function saveSpotifyToken(token) {
 }
 
 async function getSpotifyAccessToken() {
-  const token = safeJsonParse(sessionStorage.getItem(STORAGE.spotifyToken));
+  const token = safeJsonParse(getStoredItem(STORAGE.spotifyToken));
   if (!token?.accessToken) throw new Error("Spotify is not connected.");
   if (token.expiresAt > Date.now()) return token.accessToken;
   if (!token.refreshToken) throw new Error("Spotify token expired. Connect again.");
@@ -393,7 +503,7 @@ async function getSpotifyAccessToken() {
     refreshToken: body.refresh_token || token.refreshToken,
     expiresAt: Date.now() + (body.expires_in || 3600) * 1000 - 60000,
   };
-  sessionStorage.setItem(STORAGE.spotifyToken, JSON.stringify(nextToken));
+  setStoredItem(STORAGE.spotifyToken, JSON.stringify(nextToken));
   return nextToken.accessToken;
 }
 
@@ -473,8 +583,16 @@ async function connectApple() {
     setBusy(true, "Opening Apple Music...");
     await configureMusicKit();
     const music = window.MusicKit.getInstance();
-    const userToken = await music.authorize();
-    sessionStorage.setItem(STORAGE.appleUserToken, userToken || music.musicUserToken || "");
+    const storedToken = getStoredItem(STORAGE.appleUserToken);
+    if (storedToken && !music.musicUserToken) {
+      try {
+        music.musicUserToken = storedToken;
+      } catch {
+        // MusicKit owns this value in some browsers.
+      }
+    }
+    const userToken = music.musicUserToken || storedToken || await music.authorize();
+    setStoredItem(STORAGE.appleUserToken, userToken || music.musicUserToken || "");
 
     state.session = {
       service: "apple",
@@ -563,7 +681,7 @@ function appleArtworkUrl(template = "") {
 async function preferAppleLikedTracks(tracks, music) {
   if (!tracks.length) return tracks;
 
-  const userToken = music.musicUserToken || sessionStorage.getItem(STORAGE.appleUserToken);
+  const userToken = music.musicUserToken || getStoredItem(STORAGE.appleUserToken);
   if (!hasAppleTokenSource() || !userToken) return tracks;
   const developerToken = await getAppleDeveloperToken();
 
@@ -593,7 +711,7 @@ async function preferAppleLikedTracks(tracks, music) {
       return tracks;
     }
 
-    setStatus(`Apple Music found ${likedIds.size} liked tunes. Mashing those.`, "info");
+    setStatus(`Apple Music found ${likedIds.size} liked tunes. Using those.`, "info");
     return tracks.filter((track) => likedIds.has(track.id));
   } catch {
     return tracks;
@@ -602,24 +720,120 @@ async function preferAppleLikedTracks(tracks, music) {
 
 async function finishCollection() {
   if (!state.session?.tracks?.length) {
+    state.readyToMash = false;
+    state.mashComplete = false;
+    markLoadingStepDone("yourSongs", {
+      title: "No songs found",
+      copy: "Nothing turned up in this sack.",
+      counter: "0",
+    });
     setStatus("No tunes were found for this account.", "error");
     return;
   }
 
+  markLoadingStepDone("yourSongs", {
+    copy: `${state.session.tracks.length} tunes dug up.`,
+    counter: String(state.session.tracks.length),
+  });
+  await waitForPaint();
+
   if (state.invite) {
-    state.matches = matchTracks(state.invite.tracks, state.session.tracks);
+    state.matches = [];
     state.activeBlend = null;
-    await ensureMyInviteLink();
-    saveCurrentBlendHistory();
-    setStatus(`Found ${state.matches.length} shared tune${state.matches.length === 1 ? "" : "s"}.`, "info");
+    state.shareLink = "";
+    state.readyToMash = true;
+    state.mashComplete = false;
+    els.statusLog.classList.add("hidden");
     return;
   }
 
+  state.readyToMash = false;
+  state.mashComplete = false;
+  setLoadingProgress("generate", 36, {
+    title: "Generating",
+    copy: "Packing your potato link.",
+    counter: "...",
+    showArtwork: false,
+  });
+  await waitForPaint();
   const invite = await ensureMyInviteLink();
   state.invite = invite;
   sessionStorage.setItem(STORAGE.pendingInvite, JSON.stringify(invite));
   state.shareLink = state.myShareLink;
+  markLoadingStepDone("generate", {
+    copy: "Spud link ready.",
+    counter: String(state.session.tracks.length),
+    showArtwork: false,
+  });
   setStatus("Spud link ready.", "info");
+}
+
+async function mashInvite() {
+  if (state.busy || !state.invite || !state.session?.tracks?.length) return;
+
+  try {
+    state.readyToMash = false;
+    state.mashComplete = false;
+    state.matches = [];
+    setBusy(true);
+    startLoadingFlow("yourSongs", {
+      title: "Finding your songs",
+      copy: `${state.session.tracks.length} tunes ready.`,
+      counter: String(state.session.tracks.length),
+      progress: 72,
+      showArtwork: false,
+    });
+    await waitForPaint();
+    markLoadingStepDone("yourSongs", {
+      copy: `${state.session.tracks.length} tunes ready.`,
+      counter: String(state.session.tracks.length),
+      showArtwork: false,
+    });
+    markLoadingStepDone("spuddySongs", {
+      title: "Finding your spuddy's songs",
+      copy: `${state.invite.tracks.length} spuddy tunes ready.`,
+      counter: String(state.invite.tracks.length),
+      showArtwork: false,
+    });
+    await waitForPaint();
+    setLoadingProgress("mash", 38, {
+      title: "Mashing overlaps",
+      copy: "Squishing the shared favorites.",
+      counter: "...",
+      showArtwork: false,
+    });
+    await waitForPaint();
+
+    state.matches = matchTracks(state.invite.tracks, state.session.tracks);
+    state.activeBlend = null;
+    state.mashComplete = true;
+    markLoadingStepDone("mash", {
+      copy: `${state.matches.length} overlaps mashed.`,
+      counter: String(state.matches.length),
+      showArtwork: false,
+    });
+    setLoadingProgress("generate", 60, {
+      title: "Generating",
+      copy: "Warming up the playlist.",
+      counter: String(state.matches.length),
+      showArtwork: false,
+    });
+    await ensureMyInviteLink();
+    saveCurrentBlendHistory();
+    markLoadingStepDone("generate", {
+      copy: "Blend ready.",
+      counter: String(state.matches.length),
+      showArtwork: false,
+    });
+    setStatus(`Found ${state.matches.length} shared tune${state.matches.length === 1 ? "" : "s"}.`, "info");
+  } catch (error) {
+    state.readyToMash = true;
+    state.mashComplete = false;
+    setStatus(error.message || "Could not mash those playlists.", "error");
+  } finally {
+    setBusy(false);
+    render();
+  }
 }
 
 function createInviteFromSession() {
@@ -668,7 +882,13 @@ async function createShareLink(invite) {
   const payload = await encodeInvitePayload(invite);
   const url = new URL(window.location.href);
   url.search = "";
-  url.hash = `join=${payload}`;
+  url.hash = `/spuddies/${payload}`;
+  if (
+    invite.blendId &&
+    (invite.blendId === state.invite?.blendId || (!state.invite && invite.blendId === state.myInvite?.blendId))
+  ) {
+    state.invitePayload = payload;
+  }
   return url.toString();
 }
 
@@ -1029,14 +1249,22 @@ function uniqueTracks(tracks) {
 async function ensureAppleAuthorized() {
   await configureMusicKit();
   const music = window.MusicKit.getInstance();
-  const existingToken = music.musicUserToken || sessionStorage.getItem(STORAGE.appleUserToken);
+  const storedToken = getStoredItem(STORAGE.appleUserToken);
+  if (storedToken && !music.musicUserToken) {
+    try {
+      music.musicUserToken = storedToken;
+    } catch {
+      // MusicKit owns this value in some browsers.
+    }
+  }
+  const existingToken = music.musicUserToken || storedToken;
   if (existingToken) {
-    sessionStorage.setItem(STORAGE.appleUserToken, existingToken);
+    setStoredItem(STORAGE.appleUserToken, existingToken);
     return music;
   }
 
   const userToken = await music.authorize();
-  sessionStorage.setItem(STORAGE.appleUserToken, userToken || music.musicUserToken || "");
+  setStoredItem(STORAGE.appleUserToken, userToken || music.musicUserToken || "");
   return music;
 }
 
@@ -1065,11 +1293,17 @@ async function getAppleDeveloperToken() {
 async function resolveSpotifyPlaylistUris(accessToken) {
   const missing = [];
   const items = [];
+  const total = state.matches.length || 1;
 
-  for (const match of state.matches) {
+  for (const [index, match] of state.matches.entries()) {
     const existing = [match.yourTrack, match.hostTrack].find((track) => track?.service === "spotify" && track.uri);
     if (existing?.uri) {
       items.push(existing.uri);
+      setLoadingProgress("generate", 30 + ((index + 1) / total) * 40, {
+        copy: "Finding playlist tracks.",
+        counter: `${index + 1}/${total}`,
+        showArtwork: false,
+      });
       continue;
     }
 
@@ -1079,6 +1313,11 @@ async function resolveSpotifyPlaylistUris(accessToken) {
     } else {
       missing.push(preferredTrack(match).title);
     }
+    setLoadingProgress("generate", 30 + ((index + 1) / total) * 40, {
+      copy: "Finding playlist tracks.",
+      counter: `${index + 1}/${total}`,
+      showArtwork: false,
+    });
   }
 
   return {
@@ -1136,13 +1375,19 @@ async function searchSpotifyTrack(accessToken, reference) {
 async function resolveApplePlaylistTracks() {
   const missing = [];
   const items = [];
+  const total = state.matches.length || 1;
 
-  for (const match of state.matches) {
+  for (const [index, match] of state.matches.entries()) {
     const existing = [match.yourTrack, match.hostTrack].find((track) => track?.service === "apple" && track.id);
     if (existing?.id) {
       items.push({
         id: existing.catalogId || existing.id,
         type: existing.catalogId ? "songs" : existing.appleType || "library-songs",
+      });
+      setLoadingProgress("generate", 30 + ((index + 1) / total) * 40, {
+        copy: "Finding playlist tracks.",
+        counter: `${index + 1}/${total}`,
+        showArtwork: false,
       });
       continue;
     }
@@ -1153,6 +1398,11 @@ async function resolveApplePlaylistTracks() {
     } else {
       missing.push(preferredTrack(match).title);
     }
+    setLoadingProgress("generate", 30 + ((index + 1) / total) * 40, {
+      copy: "Finding playlist tracks.",
+      counter: `${index + 1}/${total}`,
+      showArtwork: false,
+    });
   }
 
   return {
@@ -1162,7 +1412,7 @@ async function resolveApplePlaylistTracks() {
 }
 
 async function searchAppleTrack(reference) {
-  const musicUserToken = sessionStorage.getItem(STORAGE.appleUserToken);
+  const musicUserToken = getStoredItem(STORAGE.appleUserToken);
   const developerToken = await getAppleDeveloperToken();
   const url = new URL(`https://api.music.apple.com/v1/catalog/${state.config.appleStorefrontId || "us"}/search`);
   url.search = new URLSearchParams({
@@ -1214,12 +1464,13 @@ async function createPlaylist(targetService) {
   if (!state.matches.length) return;
 
   try {
-    setBusy(true, `Planting in ${serviceName(targetService)}...`);
+    setBusy(true);
+    startPlaylistLoading(targetService);
     if (targetService === "spotify") {
       if (!state.config.spotifyClientId) {
         throw new Error("Potatunes setup is not finished yet. Check Spotify and Cloudflare setup.");
       }
-      if (!sessionStorage.getItem(STORAGE.spotifyToken)) {
+      if (!getStoredItem(STORAGE.spotifyToken)) {
         saveAppSnapshot();
         await beginSpotifyAuth("export-spotify");
         return;
@@ -1240,12 +1491,38 @@ async function createPlaylist(targetService) {
   }
 }
 
+function startPlaylistLoading(targetService) {
+  startLoadingFlow("generate", {
+    title: "Generating",
+    copy: `Planting in ${serviceName(targetService)}.`,
+    counter: "mix",
+    progress: 16,
+    showArtwork: false,
+  });
+  markLoadingStepDone("yourSongs", { render: false });
+  markLoadingStepDone("spuddySongs", { render: false });
+  markLoadingStepDone("mash", { render: false });
+  state.loading.stage = "generate";
+  renderLoadingPanel();
+}
+
 async function createSpotifyPlaylist() {
+  if (!state.loading.active) startPlaylistLoading("spotify");
+  setLoadingProgress("generate", 24, {
+    copy: "Checking Spotify tracks.",
+    counter: "...",
+    showArtwork: false,
+  });
   const accessToken = await getSpotifyAccessToken();
   const profile = await fetchSpotifyProfile(accessToken);
   const { items: uris, missing } = await resolveSpotifyPlaylistUris(accessToken);
   if (!uris.length) throw new Error("Spotify could not find any matching tracks.");
 
+  setLoadingProgress("generate", 78, {
+    copy: "Planting the playlist.",
+    counter: String(uris.length),
+    showArtwork: false,
+  });
   const created = await fetch(`https://api.spotify.com/v1/users/${encodeURIComponent(profile.id)}/playlists`, {
     method: "POST",
     headers: {
@@ -1261,7 +1538,8 @@ async function createSpotifyPlaylist() {
   const playlist = await created.json().catch(() => ({}));
   if (!created.ok) throw new Error(playlist.error?.message || "Spotify playlist creation failed.");
 
-  for (const chunk of chunkArray(uris, 100)) {
+  const chunks = chunkArray(uris, 100);
+  for (const [index, chunk] of chunks.entries()) {
     const response = await fetch(`https://api.spotify.com/v1/playlists/${playlist.id}/items`, {
       method: "POST",
       headers: {
@@ -1272,21 +1550,42 @@ async function createSpotifyPlaylist() {
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error?.message || "Spotify could not add tracks.");
+    setLoadingProgress("generate", 82 + ((index + 1) / chunks.length) * 14, {
+      copy: "Planting the playlist.",
+      counter: String(uris.length),
+      showArtwork: false,
+    });
   }
 
   const skipped = missing.length ? ` ${missing.length} tune${missing.length === 1 ? "" : "s"} could not be found.` : "";
+  markLoadingStepDone("generate", {
+    copy: "Spotify playlist planted.",
+    counter: String(uris.length),
+    showArtwork: false,
+  });
   setStatus(`Planted ${uris.length} tune${uris.length === 1 ? "" : "s"} in Spotify.${skipped}`, "info");
 }
 
 async function createApplePlaylist() {
+  if (!state.loading.active) startPlaylistLoading("apple");
+  setLoadingProgress("generate", 24, {
+    copy: "Checking Apple Music tracks.",
+    counter: "...",
+    showArtwork: false,
+  });
   const music = await ensureAppleAuthorized();
-  const musicUserToken = music?.musicUserToken || sessionStorage.getItem(STORAGE.appleUserToken);
+  const musicUserToken = music?.musicUserToken || getStoredItem(STORAGE.appleUserToken);
   if (!musicUserToken) throw new Error("Apple Music is not connected.");
   const developerToken = await getAppleDeveloperToken();
 
   const { items: tracks, missing } = await resolveApplePlaylistTracks();
   if (!tracks.length) throw new Error("Apple Music could not find any matching tracks.");
 
+  setLoadingProgress("generate", 78, {
+    copy: "Planting the playlist.",
+    counter: String(tracks.length),
+    showArtwork: false,
+  });
   const headers = {
     Authorization: `Bearer ${developerToken}`,
     "Music-User-Token": musicUserToken,
@@ -1309,7 +1608,8 @@ async function createApplePlaylist() {
   const playlistId = playlist.data?.[0]?.id;
   if (!playlistId) throw new Error("Apple Music did not return a playlist ID.");
 
-  for (const chunk of chunkArray(tracks, 100)) {
+  const chunks = chunkArray(tracks, 100);
+  for (const [index, chunk] of chunks.entries()) {
     const response = await fetch(`https://api.music.apple.com/v1/me/library/playlists/${playlistId}/tracks`, {
       method: "POST",
       headers,
@@ -1319,9 +1619,19 @@ async function createApplePlaylist() {
       const body = await response.json().catch(() => ({}));
       throw new Error(body.errors?.[0]?.detail || "Apple Music could not add tracks.");
     }
+    setLoadingProgress("generate", 82 + ((index + 1) / chunks.length) * 14, {
+      copy: "Planting the playlist.",
+      counter: String(tracks.length),
+      showArtwork: false,
+    });
   }
 
   const skipped = missing.length ? ` ${missing.length} tune${missing.length === 1 ? "" : "s"} could not be found.` : "";
+  markLoadingStepDone("generate", {
+    copy: "Apple Music playlist planted.",
+    counter: String(tracks.length),
+    showArtwork: false,
+  });
   setStatus(`Planted ${tracks.length} tune${tracks.length === 1 ? "" : "s"} in Apple Music.${skipped}`, "info");
 }
 
@@ -1376,6 +1686,7 @@ async function importBlendPack(event) {
   event.target.value = "";
   if (!file) return;
 
+  let loading = false;
   try {
     const body = JSON.parse(await file.text());
     if (!body?.tracks?.length) throw new Error("Missing tracks.");
@@ -1390,18 +1701,61 @@ async function importBlendPack(event) {
     };
     state.matches = [];
     state.shareLink = "";
+    state.invitePayload = "";
+    state.readyToMash = false;
+    state.mashComplete = false;
     sessionStorage.setItem(STORAGE.pendingInvite, JSON.stringify(state.invite));
     if (state.session?.tracks?.length) {
+      loading = true;
+      setBusy(true);
+      startLoadingFlow("spuddySongs", {
+        title: "Finding your spuddy's songs",
+        copy: `${state.invite.tracks.length} spuddy tunes in the sack.`,
+        counter: String(state.invite.tracks.length),
+        progress: 65,
+        showArtwork: false,
+      });
+      markLoadingStepDone("yourSongs", {
+        counter: String(state.session.tracks.length),
+        render: false,
+      });
+      markLoadingStepDone("spuddySongs", {
+        counter: String(state.invite.tracks.length),
+        render: false,
+      });
+      renderLoadingPanel();
+      await waitForPaint();
+      setLoadingProgress("mash", 38, {
+        title: "Mashing overlaps",
+        copy: "Squishing the shared favorites.",
+        counter: "...",
+        showArtwork: false,
+      });
+      await waitForPaint();
       state.matches = matchTracks(state.invite.tracks, state.session.tracks);
+      state.mashComplete = true;
+      markLoadingStepDone("mash", {
+        copy: `${state.matches.length} overlaps mashed.`,
+        counter: String(state.matches.length),
+        showArtwork: false,
+      });
+      markLoadingStepDone("generate", {
+        title: "Generating",
+        copy: "Blend ready.",
+        counter: String(state.matches.length),
+        showArtwork: false,
+      });
       await ensureMyInviteLink();
       saveCurrentBlendHistory();
       setStatus(`Sack imported. Found ${state.matches.length} shared tune${state.matches.length === 1 ? "" : "s"}.`, "info");
     } else {
       setStatus("Sack imported. Pick your app to mash it.", "info");
     }
-    render();
   } catch {
     setStatus("That file was not a valid potato sack.", "error");
+  } finally {
+    if (loading) setBusy(false);
+    render();
   }
 }
 
@@ -1510,6 +1864,9 @@ function openBlendHistory(event) {
     },
     tracks: item.matches.map((match) => toTrack(match.hostTrack)),
   };
+  state.invitePayload = "";
+  state.readyToMash = false;
+  state.mashComplete = true;
   setStatus(`Opened blend with ${item.friendName}.`, "info");
   render();
 }
@@ -1558,12 +1915,15 @@ async function loadDemo() {
     },
     tracks: hostTracks,
   };
+  state.invitePayload = "";
   state.session = {
     service: "apple",
     profile: { name: "Sample Apple Music spud" },
     tracks: guestTracks,
   };
   state.matches = matchTracks(hostTracks, guestTracks);
+  state.readyToMash = false;
+  state.mashComplete = true;
   state.myInvite = createInviteFromSession();
   state.myShareLink = await createShareLink(state.myInvite);
   state.shareLink = state.myShareLink;
@@ -1572,12 +1932,14 @@ async function loadDemo() {
   render();
 }
 
-function clearSession() {
-  sessionStorage.removeItem(STORAGE.spotifyToken);
+function clearSession({ clearAuth = false } = {}) {
   sessionStorage.removeItem(STORAGE.spotifyOAuth);
   sessionStorage.removeItem(STORAGE.pendingInvite);
-  sessionStorage.removeItem(STORAGE.appleUserToken);
   sessionStorage.removeItem(STORAGE.appSnapshot);
+  if (clearAuth) {
+    removeStoredItem(STORAGE.spotifyToken);
+    removeStoredItem(STORAGE.appleUserToken);
+  }
   state.invite = null;
   state.session = null;
   state.matches = [];
@@ -1586,7 +1948,11 @@ function clearSession() {
   state.myShareLink = "";
   state.activeBlend = null;
   state.walkthroughIndex = null;
-  window.history.replaceState(null, "", window.location.pathname);
+  state.invitePayload = "";
+  state.readyToMash = false;
+  state.mashComplete = false;
+  state.loading = defaultLoadingState();
+  setRoute("/");
 }
 
 function goHome() {
@@ -1596,13 +1962,13 @@ function goHome() {
 }
 
 function logout() {
-  clearSession();
+  clearSession({ clearAuth: true });
   setStatus("Logged out.", "info");
   render();
 }
 
 function resetSession() {
-  clearSession();
+  clearSession({ clearAuth: true });
   setStatus("Session reset.", "info");
   render();
 }
@@ -1633,6 +1999,9 @@ function saveAppSnapshot() {
       shareLink: state.shareLink,
       myInvite: state.myInvite,
       myShareLink: state.myShareLink,
+      invitePayload: state.invitePayload,
+      readyToMash: state.readyToMash,
+      mashComplete: state.mashComplete,
     }),
   );
 }
@@ -1658,16 +2027,24 @@ function restoreAppSnapshot() {
   state.shareLink = snapshot.shareLink || "";
   state.myInvite = snapshot.myInvite || null;
   state.myShareLink = snapshot.myShareLink || "";
+  state.invitePayload = snapshot.invitePayload || "";
   state.matches = state.invite && state.session ? matchTracks(state.invite.tracks, state.session.tracks) : [];
+  state.readyToMash = Boolean(snapshot.readyToMash && state.invite && state.session && !state.matches.length);
+  state.mashComplete = Boolean(snapshot.mashComplete || state.matches.length);
 }
 
 function render() {
   renderConfigBadge();
   renderModeBanner();
   renderPanels();
+  renderInviteIntro();
+  renderVerifiedPanel();
+  renderLoadingPanel();
   renderWalkthrough();
   renderSteps();
+  renderBackButton();
   renderButtons();
+  normalizeRoute();
   if (window.lucide) window.lucide.createIcons();
 }
 
@@ -1679,12 +2056,7 @@ function renderConfigBadge() {
 }
 
 function renderModeBanner() {
-  if (!state.invite || state.session) {
-    els.modeBanner.classList.add("hidden");
-    return;
-  }
-  els.modeBanner.classList.remove("hidden");
-  els.modeBanner.innerHTML = `<strong>${escapeHtml(state.invite.host?.name || "A friend")}</strong> wants to mash tunes with you.`;
+  els.modeBanner.classList.add("hidden");
 }
 
 function renderPanels() {
@@ -1692,25 +2064,54 @@ function renderPanels() {
   const hasInvite = Boolean(state.invite);
   const isWalking = state.walkthroughIndex !== null;
   const isHosting = Boolean(hasSession && state.shareLink && state.matches.length === 0);
-  const isJoining = Boolean(hasSession && hasInvite && !state.shareLink);
-  const collecting = state.busy && hasSession && !state.session.tracks.length;
+  const isJoinFlow = Boolean(hasSession && hasInvite && !state.shareLink);
+  const isVerified = Boolean(isJoinFlow && state.readyToMash && !state.mashComplete);
+  const hasJoinResults = Boolean(isJoinFlow && state.mashComplete);
+  const loading = state.busy && state.loading.active;
 
-  els.connectPanel.classList.toggle("hidden", hasSession || collecting || isWalking);
-  els.accountPanel.classList.toggle("hidden", !hasSession);
-  els.libraryPanel.classList.toggle("hidden", !collecting);
-  els.invitePanel.classList.toggle("hidden", !isHosting);
-  els.resultsPanel.classList.toggle("hidden", !(isJoining || state.matches.length > 0));
-
-  if (!hasSession) {
-    els.connectTitle.textContent = hasInvite ? "Pick your music app" : "Pick your music app";
-    els.connectCopy.textContent = hasInvite
-      ? "We'll check what grew in both sacks."
-      : "";
-  }
+  els.connectPanel.classList.toggle("hidden", loading || hasSession || isWalking);
+  els.accountPanel.classList.toggle("hidden", loading || !hasSession || isJoinFlow);
+  els.libraryPanel.classList.toggle("hidden", !loading);
+  els.verifiedPanel.classList.toggle("hidden", loading || !isVerified || isWalking);
+  els.invitePanel.classList.toggle("hidden", loading || !isHosting);
+  els.resultsPanel.classList.toggle("hidden", loading || !(hasJoinResults || state.matches.length > 0));
 
   if (isHosting) renderInvitePanel();
-  if (hasSession) renderAccountPanel();
-  if (isJoining || state.matches.length > 0) renderResults();
+  if (hasSession && !isJoinFlow) renderAccountPanel();
+  if (hasJoinResults || state.matches.length > 0) renderResults();
+}
+
+function renderInviteIntro() {
+  if (!state.invite || state.session) {
+    els.inviteIntro.classList.add("hidden");
+    return;
+  }
+
+  const hostName = state.invite.host?.name || "A spuddy";
+  const platform = serviceName(state.invite.host?.service);
+  els.inviteIntro.classList.remove("hidden");
+  els.inviteIntroTitle.textContent = `${hostName} (${platform}) wants to be spuddies!`;
+  els.inviteIntroCopy.textContent = "Log in to see your shared liked songs";
+}
+
+function renderVerifiedPanel() {
+  if (!state.readyToMash || !state.invite || !state.session) return;
+
+  const name = state.session.profile?.name || "this account";
+  const platform = serviceName(state.session.service);
+  els.verifiedTitle.textContent = "successfully verified!";
+  els.verifiedCopy.textContent = `Logged in as ${name} (${platform}).`;
+}
+
+function renderBackButton() {
+  const isHome =
+    !state.invite &&
+    !state.session &&
+    !state.shareLink &&
+    !state.matches.length &&
+    !state.activeBlend &&
+    state.walkthroughIndex === null;
+  els.homeButton.classList.toggle("hidden", isHome);
 }
 
 function renderAccountPanel() {
@@ -1847,10 +2248,11 @@ function matchRowHtml(match) {
 function renderSteps() {
   const hasSession = Boolean(state.session);
   const hasInvite = Boolean(state.invite);
-  const hasBlend = state.matches.length > 0 || (hasInvite && hasSession && !state.shareLink);
+  const hasJoinResults = Boolean(hasInvite && hasSession && !state.shareLink && state.mashComplete);
+  const hasBlend = state.matches.length > 0 || state.shareLink || hasJoinResults;
   setStep(els.stepConnect, hasSession ? "done" : "active");
-  setStep(els.stepCollect, hasSession ? (hasBlend || state.shareLink ? "done" : "active") : "");
-  setStep(els.stepBlend, hasBlend || state.shareLink ? "active" : "");
+  setStep(els.stepCollect, hasSession ? (hasBlend || state.readyToMash ? "done" : "active") : "");
+  setStep(els.stepBlend, hasBlend || state.readyToMash ? "active" : "");
 }
 
 function setStep(el, status) {
@@ -1866,6 +2268,7 @@ function renderButtons() {
     els.demoButton,
     els.homeButton,
     els.importButton,
+    els.mashButton,
     els.copyMyInviteButton,
     els.logoutButton,
     els.copyInviteButton,
@@ -1880,6 +2283,7 @@ function renderButtons() {
   });
 
   els.copyInviteButton.disabled = disabled || !state.shareLink;
+  els.mashButton.disabled = disabled || !state.readyToMash || !state.invite || !state.session?.tracks?.length;
   els.copyMyInviteButton.disabled = disabled || !state.session?.tracks?.length;
   els.downloadPackButton.disabled = disabled || !state.invite;
   els.exportCsvButton.disabled = disabled || !state.matches.length;
@@ -1888,21 +2292,123 @@ function renderButtons() {
 }
 
 function renderCollecting(serviceNameText, count, total) {
-  els.connectPanel.classList.add("hidden");
-  els.libraryPanel.classList.remove("hidden");
-  els.resultsPanel.classList.add("hidden");
-  els.invitePanel.classList.add("hidden");
-  els.libraryTitle.textContent = `Reading ${serviceNameText}`;
+  state.loading = {
+    ...defaultLoadingState(),
+    active: true,
+    title: "Finding your songs",
+    copy: `${serviceNameText} is digging through your saved tunes.`,
+    counter: String(count),
+    showArtwork: true,
+  };
   updateLibraryProgress(count, total);
   render();
 }
 
 function updateLibraryProgress(count, total) {
-  els.libraryCounter.textContent = String(count);
-  els.libraryCopy.textContent = total > count ? `${count} of about ${total} tunes dug up.` : `${count} tunes dug up.`;
   const pct = total ? clamp((count / total) * 100, 8, 100) : 12;
-  els.progressFill.style.width = `${pct}%`;
-  renderArtworkPreview(state.session?.tracks || []);
+  setLoadingProgress("yourSongs", pct, {
+    copy: total > count ? `${count} of about ${total} tunes dug up.` : `${count} tunes dug up.`,
+    counter: String(count),
+    render: false,
+  });
+  renderLoadingPanel();
+}
+
+function defaultLoadingState() {
+  return {
+    active: false,
+    title: "Digging up songs",
+    copy: "A short potato pause.",
+    counter: "0",
+    stage: "yourSongs",
+    progress: {
+      yourSongs: 0,
+      spuddySongs: 0,
+      mash: 0,
+      generate: 0,
+    },
+    showArtwork: true,
+  };
+}
+
+function startLoadingFlow(stage, options = {}) {
+  state.loading = {
+    ...defaultLoadingState(),
+    active: true,
+    stage,
+    title: options.title || "Digging up songs",
+    copy: options.copy || "A short potato pause.",
+    counter: options.counter || "0",
+    showArtwork: options.showArtwork ?? true,
+  };
+  setLoadingProgress(stage, options.progress ?? 12, { render: false });
+  render();
+}
+
+function setLoadingProgress(stage, pct, options = {}) {
+  if (!state.loading.active) {
+    state.loading = { ...defaultLoadingState(), active: true };
+  }
+  state.loading.stage = stage;
+  state.loading.progress = {
+    ...defaultLoadingState().progress,
+    ...state.loading.progress,
+    [stage]: clamp(pct, 0, 100),
+  };
+  if (options.title) state.loading.title = options.title;
+  if (options.copy !== undefined) state.loading.copy = options.copy;
+  if (options.counter !== undefined) state.loading.counter = options.counter;
+  if (options.showArtwork !== undefined) state.loading.showArtwork = options.showArtwork;
+  if (options.render !== false) renderLoadingPanel();
+}
+
+function markLoadingStepDone(stage, options = {}) {
+  setLoadingProgress(stage, 100, options);
+}
+
+function renderLoadingPanel() {
+  if (!els.libraryTitle || !els.blendFlow) return;
+
+  const loading = state.loading;
+  els.libraryTitle.textContent = loading.title;
+  els.libraryCopy.textContent = loading.copy;
+  els.libraryCounter.textContent = loading.counter;
+
+  const stepProgress = LOADING_STEPS.map((step) => loading.progress[step.id] || 0);
+  const overallPct = stepProgress.reduce((total, value) => total + value, 0) / LOADING_STEPS.length;
+  els.progressFill.style.width = `${clamp(overallPct, loading.active ? 8 : 0, 100)}%`;
+
+  els.blendFlow.innerHTML = LOADING_STEPS.map((step) => loadingStepHtml(step, loading)).join("");
+
+  if (loading.showArtwork) {
+    renderArtworkPreview(state.session?.tracks || []);
+  } else {
+    els.sampleArtwork.innerHTML = "";
+  }
+}
+
+function loadingStepHtml(step, loading) {
+  const pct = loading.progress[step.id] || 0;
+  const active = loading.stage === step.id && pct < 100;
+  const done = pct >= 100;
+  const activeStatus = {
+    yourSongs: "digging",
+    spuddySongs: "digging",
+    mash: "mashing",
+    generate: "baking",
+  }[step.id];
+  const status = done ? "done" : active ? activeStatus : "next";
+  return `
+    <div class="blend-step ${done ? "done" : active ? "active" : ""}">
+      <div class="blend-step-copy">
+        <strong>${escapeHtml(step.label)}</strong>
+        <span>${status}</span>
+      </div>
+      <div class="blend-step-track" aria-hidden="true">
+        <span style="width: ${pct}%"></span>
+      </div>
+    </div>
+  `;
 }
 
 function renderArtworkPreview(tracks) {
@@ -1918,6 +2424,7 @@ function renderArtworkPreview(tracks) {
 
 function setBusy(value, message) {
   state.busy = value;
+  if (!value) state.loading = defaultLoadingState();
   if (message) setStatus(message, "info");
   renderButtons();
 }
@@ -1967,6 +2474,20 @@ function safeJsonParse(value) {
   }
 }
 
+function getStoredItem(key) {
+  return sessionStorage.getItem(key) || localStorage.getItem(key);
+}
+
+function setStoredItem(key, value) {
+  sessionStorage.setItem(key, value);
+  localStorage.setItem(key, value);
+}
+
+function removeStoredItem(key) {
+  sessionStorage.removeItem(key);
+  localStorage.removeItem(key);
+}
+
 function waitFor(predicate, timeoutMs) {
   const started = Date.now();
   return new Promise((resolve, reject) => {
@@ -1983,6 +2504,10 @@ function waitFor(predicate, timeoutMs) {
     };
     tick();
   });
+}
+
+function waitForPaint() {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
 
 function chunkArray(items, size) {

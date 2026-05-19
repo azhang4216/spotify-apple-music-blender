@@ -5,6 +5,10 @@
   "type": "module",
   "scripts": {
     "build:config": "node scripts/generate-config.mjs",
-    "serve": "python3 -m http.server 4173"
+    "serve": "python3 -m http.server 4173",
+    "worker:dev": "cd worker && npx wrangler dev --local --port 8787",
+    "worker:deploy": "cd worker && npx wrangler deploy",
+    "db:migrate:local": "cd worker && npx wrangler d1 migrations apply potatunes --local",
+    "db:migrate:remote": "cd worker && npx wrangler d1 migrations apply potatunes --remote"
   }
 }

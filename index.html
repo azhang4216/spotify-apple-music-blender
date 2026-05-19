@@ -33,10 +33,6 @@
         </a>
         <div class="top-actions">
           <span id="configBadge" class="status-pill neutral hidden">Checking setup</span>
-          <button id="homeButton" class="nav-button" type="button">
-            <i data-lucide="house"></i>
-            Home
-          </button>
           <button id="resetButton" class="icon-button" type="button" title="Reset session">
             <i data-lucide="rotate-ccw"></i>
           </button>
@@ -45,9 +41,13 @@
 
       <main class="app-layout">
         <section class="workspace" aria-labelledby="appTitle">
+          <button id="homeButton" class="back-button hidden" type="button">
+            <i data-lucide="arrow-left"></i>
+            Back
+          </button>
+
           <div class="intro-block">
             <div>
-              <p class="eyebrow">Mash your music</p>
               <h1 id="appTitle">Potatunes</h1>
               <p class="hero-copy">Pick an app. Send a link. Mash your shared faves.</p>
             </div>
@@ -75,13 +75,10 @@
             </li>
           </ol>
 
-          <section id="connectPanel" class="panel">
-            <div class="panel-heading">
-              <div>
-                <h2 id="connectTitle">Start the mash</h2>
-                <p id="connectCopy"></p>
-              </div>
-              <i data-lucide="sprout" aria-hidden="true"></i>
+          <section id="connectPanel" class="panel connect-panel">
+            <div id="inviteIntro" class="invite-intro hidden">
+              <h2 id="inviteIntroTitle">A spuddy wants to be spuddies!</h2>
+              <p id="inviteIntroCopy">Log in to see your shared liked songs</p>
             </div>
 
             <div class="service-grid">
@@ -112,6 +109,22 @@
               </button>
               <input id="importFile" class="hidden" type="file" accept="application/json,.json" />
             </div>
+          </section>
+
+          <section id="verifiedPanel" class="panel verified-panel hidden">
+            <div class="verified-mark" aria-hidden="true">
+              <span class="potato-eye eye-left"></span>
+              <span class="potato-eye eye-right"></span>
+              <span class="potato-mouth"></span>
+            </div>
+            <div>
+              <h2 id="verifiedTitle">successfully verified!</h2>
+              <p id="verifiedCopy">Ready to mash.</p>
+            </div>
+            <button id="mashButton" class="primary-button mash-button" type="button">
+              <i data-lucide="sparkles"></i>
+              Mash our playlists!
+            </button>
           </section>
 
           <section id="walkthroughPanel" class="panel walkthrough-panel hidden">
@@ -165,6 +178,7 @@
             <div class="progress-track" aria-hidden="true">
               <span id="progressFill"></span>
             </div>
+            <div id="blendFlow" class="blend-flow" aria-label="Blend progress"></div>
             <div id="sampleArtwork" class="art-strip" aria-label="Sample album artwork"></div>
           </section>
 

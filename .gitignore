@@ -1,5 +1,6 @@
 .env
 config.js
+.wrangler/
 worker/.dev.vars
 worker/.wrangler/
 *.p8

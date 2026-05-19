@@ -6,3 +6,9 @@ compatibility_date = "2026-05-01"
 APPLE_STOREFRONT_ID = "us"
 APPLE_TOKEN_TTL_SECONDS = "3600"
 ALLOWED_ORIGINS = "http://localhost:4173,https://azhang4216.github.io"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "potatunes"
+database_id = "5dfc5d50-0a81-4129-b775-f30ea1f7fcf2"
+migrations_dir = "migrations"
