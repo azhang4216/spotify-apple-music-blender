@@ -1,234 +1,79 @@
 # Potatunes
 
-A GitHub Pages web app plus Cloudflare Worker backend that lets Spotify listeners and Apple Music listeners find the songs they both saved or kept in their library.
+Potatunes is a small web app for two friends on different music platforms to find the songs they both like. One person can use Spotify, the other can use Apple Music, and Potatunes creates a shared mash that can be exported back to Spotify, Apple Music, or CSV.
 
-Secrets stay server-side:
+The app is hosted as a static GitHub Pages site, with a Cloudflare Worker and D1 database for the parts that cannot safely live in the browser: Apple Music token signing, user sessions, short invite links, saved library snapshots, and stored mashes.
 
-- Spotify uses Authorization Code with PKCE, so no client secret is needed in the browser.
-- Apple Music developer tokens are signed by the Worker.
-- Cloudflare D1 stores durable users, invite slugs, library snapshots, blends, and playlist export records.
-- Provider tokens and Potatunes session tokens are never placed in invite links.
+## Architecture
 
-## What It Does
+```mermaid
+flowchart LR
+  UserA[Friend A<br/>Spotify or Apple Music] --> Pages[GitHub Pages<br/>static Potatunes UI]
+  UserB[Friend B<br/>Spotify or Apple Music] --> Pages
 
-1. First listener connects Spotify or Apple Music.
-2. The app reads their saved/library songs, deduplicates them, and stores a library snapshot.
-3. Friend opens the invite and connects their account.
-4. Potatunes finds the shared songs.
-5. The result can be saved to Spotify, Apple Music, or CSV, with export records stored in D1.
+  Pages --> Spotify[Spotify Web API<br/>PKCE auth, saved tracks, playlist export]
+  Pages --> MusicKit[MusicKit JS<br/>Apple auth, library songs, playlist export]
 
-## Identity Model
-
-Potatunes now has a D1-backed identity model:
-
-- `users` stores the provider, provider user ID, and display name.
-- `library_snapshots` stores each saved/library song pull.
-- `blend_invites` stores shareable invite slugs.
-- `blends` and `blend_tracks` store each friend overlap.
-- `playlist_exports` stores Spotify, Apple Music, and CSV export records.
-
-The same person can create multiple invite links and multiple blends with different friends. Each blend is attached to the signed-in Potatunes user session and the invite used to create it.
-
-The frontend creates short D1-backed invite links when the Worker session is available, with the original compressed-link format kept as a fallback.
-
-## Matching Design
-
-The GitHub Pages version does not call an LLM because API keys cannot be safely embedded in a public static app. Instead, it uses a deterministic matching layer:
-
-- exact ISRC match when both platforms expose it
-- normalized title + primary artist match
-- fuzzy scoring across title, artist, and duration
-- cleanup for radio edits, remasters, featured artists, punctuation, duplicate releases, and common version labels
-- penalties for likely-different versions such as live, acoustic, instrumental, karaoke, and remix
-
-If you later add an LLM, the best place for it is as a final reviewer for borderline matches, not as the primary matcher.
-
-## Playlist Export
-
-The results screen has explicit buttons for `Save to Spotify`, `Save to Apple Music`, and `Export CSV`.
-
-Saving to a target service requires authorization for that service in the current browser session. Cross-service saves use catalog search to resolve the matched song names and artists to target-platform IDs before creating the playlist.
-
-## Setup
-
-Potatunes reads credentials from environment variables and generates `config.js`.
-
-Create a local `.env` from the sample:
-
-```bash
-cp .env.example .env
+  Pages --> Worker[Cloudflare Worker<br/>sessions, Apple developer tokens, API]
+  Worker --> D1[(Cloudflare D1<br/>users, invites, library snapshots, mashes)]
+  Worker --> AppleAPI[Apple Music API<br/>developer token validation]
 ```
 
-Fill in:
+## How It Works
+
+1. A user signs in with Spotify or Apple Music.
+2. Potatunes reads their saved/library songs and stores a D1 library snapshot.
+3. That snapshot is reused for one week, so logging in again does not keep re-pulling the whole library.
+4. The user copies a short invite link and sends it to a friend.
+5. The friend signs in, Potatunes compares both stored libraries, and the mash is saved in D1.
+6. The logged-in home page shows `Mashed Potatunes`: one card per friend mash, with the overlap count.
+7. Opening a mash at `#/mash/<mash-id>` shows the paginated song list and export buttons.
+
+## Matching
+
+Potatunes currently uses deterministic matching instead of an LLM. It prefers exact ISRC matches when available, then normalized title and artist matching, plus fuzzy title/artist/duration scoring. It normalizes common differences like radio edits, remasters, punctuation, featured artists, and duplicate releases, while penalizing likely-different versions like live, acoustic, instrumental, karaoke, and remix.
+
+This keeps the public GitHub Pages app free of LLM API secrets.
+
+## Secrets
+
+No private secrets belong in GitHub Pages or `config.js`.
+
+- Spotify uses Authorization Code with PKCE, so the browser only needs `SPOTIFY_CLIENT_ID`.
+- Apple Music developer tokens are signed by the Cloudflare Worker.
+- The Apple private key and Potatunes session secret live only in Cloudflare Worker secrets.
+- Invite links contain short slugs, not provider tokens.
+
+## Deploy Notes
+
+Frontend config is generated into `config.js` locally, and into `dist/config.js` in GitHub Actions.
+
+Required frontend values:
 
 ```text
-SPOTIFY_CLIENT_ID=
-SPOTIFY_REDIRECT_URI=http://localhost:4173/
-APPLE_TOKEN_ENDPOINT=http://localhost:8787/apple-music-token
-POTATUNES_API_BASE=http://localhost:8787
-APPLE_STOREFRONT_ID=us
+SPOTIFY_CLIENT_ID
+SPOTIFY_REDIRECT_URI
+APPLE_TOKEN_ENDPOINT
+POTATUNES_API_BASE
+APPLE_STOREFRONT_ID
 ```
 
-Then generate the browser config:
+Required Worker secrets:
+
+```text
+APPLE_TEAM_ID
+APPLE_KEY_ID
+APPLE_MEDIA_SERVICES_PRIVATE_KEY
+POTATUNES_SESSION_SECRET
+```
+
+Useful commands:
 
 ```bash
 npm run build:config
-```
-
-`config.js` is generated and ignored by git. It should contain public browser config only.
-
-Everything in `config.js` is public once deployed to GitHub Pages. Apple private-key material belongs only in the Cloudflare Worker secrets.
-
-## Spotify App
-
-Create a Spotify app and add redirect URIs for every place you run the app:
-
-- `http://localhost:4173/`
-- `https://YOUR_USER.github.io/YOUR_REPO/`
-
-The app requests these scopes:
-
-- `user-library-read`
-- `user-read-private`
-- `playlist-modify-private`
-- `playlist-modify-public`
-
-Relevant Spotify docs:
-
-- [Authorization Code with PKCE](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow)
-- [Get User's Saved Tracks](https://developer.spotify.com/documentation/web-api/reference/get-users-saved-tracks)
-- [Create Playlist](https://developer.spotify.com/documentation/web-api/reference/create-playlist)
-- [Add Items to Playlist](https://developer.spotify.com/documentation/web-api/reference/add-tracks-to-playlist)
-
-## Apple Music App
-
-Create a MusicKit Media ID and Media Services private key. The frontend fetches short-lived Apple developer tokens from the Cloudflare Worker in `worker/`.
-
-The app uses:
-
-- MusicKit JS authorization in the browser
-- `music.api.library.songs()` for library songs
-- Apple Music API ratings as a best-effort liked-song filter
-- Apple Music API library playlist endpoints for saving matches
-
-## Cloudflare Worker
-
-The Worker signs Apple Music developer tokens, verifies provider sign-ins, mints Potatunes sessions, and persists app data in D1.
-
-Install Wrangler if needed:
-
-```bash
-npm install -g wrangler
-```
-
-Set Worker secrets:
-
-```bash
-cd worker
-wrangler secret put APPLE_TEAM_ID
-wrangler secret put APPLE_KEY_ID
-wrangler secret put APPLE_MEDIA_SERVICES_PRIVATE_KEY
-wrangler secret put POTATUNES_SESSION_SECRET
-```
-
-For `APPLE_MEDIA_SERVICES_PRIVATE_KEY`, paste the full `.p8` contents or the same value with escaped `\n` newlines.
-
-Set allowed origins in `worker/wrangler.toml`:
-
-```toml
-ALLOWED_ORIGINS = "http://localhost:4173,https://YOUR_USER.github.io/YOUR_REPO"
-```
-
-Run locally:
-
-```bash
 npm run db:migrate:local
-npm run worker:dev
-```
-
-Deploy:
-
-```bash
 npm run db:migrate:remote
 npm run worker:deploy
 ```
 
-Then set `APPLE_TOKEN_ENDPOINT` in your frontend `.env` or GitHub repository variable to:
-
-```text
-https://YOUR_WORKER_SUBDOMAIN.workers.dev/apple-music-token
-```
-
-### D1 Database
-
-Create the database once:
-
-```bash
-cd worker
-npx wrangler d1 create potatunes
-```
-
-Copy the returned `database_id` into `worker/wrangler.toml` under the `DB` binding, then apply migrations:
-
-```bash
-npm run db:migrate:local
-npm run db:migrate:remote
-```
-
-The Worker API uses Potatunes bearer sessions for DB writes and private reads:
-
-- `POST /api/auth/spotify`: verifies a Spotify access token, upserts a user, and returns a Potatunes session.
-- `POST /api/auth/apple`: verifies a MusicKit user token, upserts a user, and returns a Potatunes session.
-- `GET /api/me`: returns the signed-in Potatunes user for `Authorization: Bearer <session>`.
-- `POST /api/library-snapshots`: stores a user's provider track list.
-- `POST /api/invites`: creates a short share slug for a snapshot.
-- `GET /api/invites/:slug`: reads public invite metadata. Add `?tracks=true` with a session to fetch tracks.
-- `POST /api/blends`: stores a completed overlap. If the same two users already have a blend, the API returns a `409` warning until the previous blend is at least 1 week old. Send `refresh: true` to create a refreshed blend after that cooldown.
-- `GET /api/users/:id/blends`: lists a user's blends.
-- `POST /api/playlist-exports`: stores Spotify, Apple Music, or CSV export metadata.
-
-Relevant Apple docs:
-
-- [MusicKit on the Web](https://js-cdn.music.apple.com/musickit/v3/docs/index.html)
-- [Get All Library Songs](https://developer.apple.com/documentation/applemusicapi/get-all-library-songs)
-- [Create a New Library Playlist](https://developer.apple.com/documentation/applemusicapi/create-a-new-library-playlist)
-- [Add Tracks to a Library Playlist](https://developer.apple.com/documentation/applemusicapi/add-tracks-to-a-library-playlist)
-
-## Local Development
-
-Generate config, then start the static server:
-
-```bash
-npm run build:config
-python3 -m http.server 4173
-```
-
-Open `http://localhost:4173/`.
-
-## GitHub Pages
-
-This repo includes a GitHub Actions workflow at `.github/workflows/deploy-pages.yml`.
-
-In GitHub, set these repository secrets:
-
-- `SPOTIFY_CLIENT_ID`
-
-Set these repository variables:
-
-- `SPOTIFY_REDIRECT_URI`: `https://YOUR_USER.github.io/YOUR_REPO/`
-- `APPLE_TOKEN_ENDPOINT`: `https://YOUR_WORKER_SUBDOMAIN.workers.dev/apple-music-token`
-- `POTATUNES_API_BASE`: `https://YOUR_WORKER_SUBDOMAIN.workers.dev`
-- `APPLE_STOREFRONT_ID`: `us`
-
-Then enable Pages with **Build and deployment > Source > GitHub Actions**.
-
-Add the same `SPOTIFY_REDIRECT_URI` value to the Spotify app redirect URI list. Spotify requires an exact match.
-
-## Hosting Constraints
-
-GitHub Pages cannot store room state or secrets. Potatunes uses Cloudflare for those pieces:
-
-- Apple private keys and session secret are Worker secrets.
-- D1 stores room state, library snapshots, blends, and export records.
-- CORS limits browser access to approved origins, but authentication comes from Potatunes bearer sessions, not CORS.
-- The frontend should call private DB routes with `Authorization: Bearer <session>`.
+GitHub Pages deploys from `.github/workflows/deploy-pages.yml`. The Cloudflare Worker deploys from `worker/src/index.js` and uses the D1 binding in `worker/wrangler.toml`.
