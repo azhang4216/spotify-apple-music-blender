@@ -182,7 +182,7 @@ The Worker API uses Potatunes bearer sessions for DB writes and private reads:
 - `POST /api/library-snapshots`: stores a user's provider track list.
 - `POST /api/invites`: creates a share slug for a snapshot.
 - `GET /api/invites/:slug`: reads public invite metadata. Add `?tracks=true` with a session to fetch tracks.
-- `POST /api/blends`: stores a completed overlap.
+- `POST /api/blends`: stores a completed overlap. If the same two users already have a blend, the API returns a `409` warning until the previous blend is at least 1 week old. Send `refresh: true` to create a refreshed blend after that cooldown.
 - `GET /api/users/:id/blends`: lists a user's blends.
 - `POST /api/playlist-exports`: stores Spotify, Apple Music, or CSV export metadata.
 

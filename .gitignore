@@ -4,3 +4,4 @@ config.js
 worker/.dev.vars
 worker/.wrangler/
 *.p8
+potatunes-sack.json

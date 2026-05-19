@@ -1,6 +1,7 @@
 const MAX_APPLE_TOKEN_TTL_SECONDS = 15_777_000;
 const MAX_SNAPSHOT_TRACKS = 12_000;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const BLEND_REFRESH_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
 const PROVIDERS = new Set(["spotify", "apple"]);
 const EXPORT_PROVIDERS = new Set(["spotify", "apple", "csv"]);
 
@@ -30,7 +31,8 @@ export default {
     } catch (error) {
       const status = error instanceof ApiError ? error.status : 500;
       const message = error instanceof Error ? error.message : "Worker request failed";
-      return json({ error: message }, status, corsHeaders);
+      const details = error instanceof ApiError ? error.details : {};
+      return json({ error: message, ...details }, status, corsHeaders);
     }
   },
 };
@@ -511,6 +513,8 @@ async function createBlend(db, body) {
   }
 
   const matches = Array.isArray(body.matches) ? body.matches : [];
+  const existingBlend = await findLatestBlendForPair(db, invite.owner_user_id, guestUserId);
+  const refreshedFromBlendId = assertBlendRefreshAllowed(existingBlend, Boolean(body.refresh));
   const blendId = newId("blend");
   const now = nowIso();
 
@@ -565,7 +569,86 @@ async function createBlend(db, body) {
   }
 
   await db.prepare("UPDATE blend_invites SET status = 'used' WHERE id = ?").bind(invite.id).run();
-  return await getBlend(db, blendId);
+  const blend = await getBlend(db, blendId);
+  if (refreshedFromBlendId) {
+    blend.refreshedFromBlendId = refreshedFromBlendId;
+    blend.warning = "Refreshed an older mashed playlist for this spuddy pair.";
+  }
+  return blend;
+}
+
+async function findLatestBlendForPair(db, userAId, userBId) {
+  if (!userAId || !userBId) return null;
+  return await db
+    .prepare(`
+      SELECT
+        b.*,
+        host.provider AS host_provider,
+        host.display_name AS host_display_name,
+        host.avatar_url AS host_avatar_url,
+        guest.provider AS guest_provider,
+        guest.display_name AS guest_display_name,
+        guest.avatar_url AS guest_avatar_url
+      FROM blends b
+      JOIN users host ON host.id = b.host_user_id
+      JOIN users guest ON guest.id = b.guest_user_id
+      WHERE
+        (b.host_user_id = ? AND b.guest_user_id = ?)
+        OR
+        (b.host_user_id = ? AND b.guest_user_id = ?)
+      ORDER BY b.created_at DESC
+      LIMIT 1
+    `)
+    .bind(userAId, userBId, userBId, userAId)
+    .first();
+}
+
+function assertBlendRefreshAllowed(existingBlend, requestedRefresh) {
+  if (!existingBlend) return "";
+
+  const createdAtMs = Date.parse(existingBlend.created_at);
+  const refreshAtMs = Number.isFinite(createdAtMs) ? createdAtMs + BLEND_REFRESH_COOLDOWN_MS : Date.now() + BLEND_REFRESH_COOLDOWN_MS;
+  const refreshAvailableAt = new Date(refreshAtMs).toISOString();
+  const existing = summarizeExistingBlend(existingBlend, refreshAvailableAt);
+
+  if (Date.now() < refreshAtMs) {
+    throw new ApiError(409, "You already have a mashed playlist with this spuddy! You can refresh it after 1 week.", {
+      code: "blend_already_exists",
+      canRefresh: false,
+      refreshAvailableAt,
+      existingBlend: existing,
+    });
+  }
+
+  if (!requestedRefresh) {
+    throw new ApiError(409, "You already have a mashed playlist with this spuddy! It is older than 1 week, so you can refresh it.", {
+      code: "blend_refresh_available",
+      canRefresh: true,
+      refreshAvailableAt,
+      existingBlend: existing,
+    });
+  }
+
+  return existingBlend.id;
+}
+
+function summarizeExistingBlend(row, refreshAvailableAt) {
+  return {
+    id: row.id,
+    createdAt: row.created_at,
+    refreshAvailableAt,
+    matchCount: row.match_count,
+    host: {
+      id: row.host_user_id,
+      provider: row.host_provider,
+      displayName: row.host_display_name,
+    },
+    guest: {
+      id: row.guest_user_id,
+      provider: row.guest_provider,
+      displayName: row.guest_display_name,
+    },
+  };
 }
 
 async function getBlend(db, blendId) {
@@ -1116,9 +1199,10 @@ function json(body, status, headers = {}) {
 }
 
 class ApiError extends Error {
-  constructor(status, message) {
+  constructor(status, message, details = {}) {
     super(message);
     this.status = status;
+    this.details = details;
   }
 }
 
