@@ -87,23 +87,19 @@
                 <span class="service-icon spotify-logo" aria-hidden="true"><span></span></span>
                 <span>
                   <strong>Continue with Spotify</strong>
-                  <small>Your green spuds</small>
+                  <small>You mean <strong>Spudify</strong>? :D</small>
                 </span>
               </button>
               <button id="appleButton" class="service-button apple" type="button">
                 <span class="service-icon apple-logo" aria-hidden="true"><span></span></span>
                 <span>
                   <strong>Continue with Apple Music</strong>
-                  <small>Your red spuds</small>
+                  <small>Potatoes are <strong>apples</strong> of the earth</small>
                 </span>
               </button>
             </div>
 
             <div class="utility-row">
-              <button id="demoButton" class="ghost-button" type="button">
-                <i data-lucide="circle-help"></i>
-                How does it work?
-              </button>
               <button id="importButton" class="ghost-button quiet-import" type="button">
                 <i data-lucide="upload"></i>
                 Import sack
@@ -128,27 +124,10 @@
             </button>
           </section>
 
-          <section id="walkthroughPanel" class="panel walkthrough-panel hidden">
-            <div class="walkthrough-scene" id="walkthroughVisual" aria-hidden="true"></div>
-            <div>
-              <p id="walkthroughStep" class="walkthrough-step">Step 1 of 3</p>
-              <h2 id="walkthroughTitle">Pick your app</h2>
-              <p id="walkthroughCopy">Potatunes digs up your saved songs.</p>
-            </div>
-            <div class="action-row">
-              <button id="walkthroughNextButton" class="primary-button" type="button">
-                Next
-              </button>
-              <button id="walkthroughCloseButton" class="secondary-button" type="button">
-                Back home
-              </button>
-            </div>
-          </section>
-
           <section id="accountPanel" class="panel account-panel hidden">
             <div class="panel-heading">
               <div>
-                <h2>Signed in</h2>
+                <h2>Your blends</h2>
                 <p id="accountSummary">Not logged in.</p>
               </div>
               <button id="logoutButton" class="secondary-button" type="button">
@@ -163,7 +142,7 @@
               </button>
             </div>
             <div class="blend-history">
-              <h2>Blended playlists</h2>
+              <h2>Mashed Potatunes</h2>
               <div id="blendHistoryList" class="blend-history-list"></div>
             </div>
           </section>
@@ -232,6 +211,17 @@
               </button>
             </div>
             <div id="matchList" class="match-list"></div>
+            <div id="resultPager" class="result-pager hidden">
+              <button id="resultPrevButton" class="secondary-button" type="button">
+                <i data-lucide="arrow-left"></i>
+                Prev
+              </button>
+              <span id="resultPageLabel">Page 1</span>
+              <button id="resultNextButton" class="secondary-button" type="button">
+                Next
+                <i data-lucide="arrow-right"></i>
+              </button>
+            </div>
           </section>
 
           <div id="statusLog" class="status-log compact hidden" role="status" aria-live="polite">

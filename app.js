@@ -53,6 +53,8 @@ const VERSION_WORDS = new Set([
 ]);
 
 const PENALTY_VERSION_WORDS = new Set(["acoustic", "instrumental", "karaoke", "live", "remix"]);
+const RESULTS_PAGE_SIZE = 40;
+const LIBRARY_REFRESH_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
 
 const state = {
   config: { ...DEFAULT_CONFIG },
@@ -65,34 +67,13 @@ const state = {
   myShareLink: "",
   blendHistory: [],
   activeBlend: null,
-  walkthroughIndex: null,
+  resultPage: 1,
   potatunesAuth: null,
   invitePayload: "",
   readyToMash: false,
   mashComplete: false,
   loading: defaultLoadingState(),
 };
-
-const WALKTHROUGH_STEPS = [
-  {
-    title: "Log in to your app",
-    copy: "Pick Spotify or Apple Music so Potatunes can read your saved tunes.",
-    scene: "login",
-    button: "Next",
-  },
-  {
-    title: "Share your link",
-    copy: "Send the hot potato to a friend.",
-    scene: "share",
-    button: "Next",
-  },
-  {
-    title: "Friend logs in",
-    copy: "They log in, then you can see the blended playlist.",
-    scene: "blend",
-    button: "Show sample",
-  },
-];
 
 const LOADING_STEPS = [
   { id: "yourSongs", label: "finding your songs" },
@@ -131,7 +112,6 @@ function bindElements() {
     "connectPanel",
     "copyInviteButton",
     "copyMyInviteButton",
-    "demoButton",
     "downloadPackButton",
     "exportCsvButton",
     "homeButton",
@@ -157,6 +137,10 @@ function bindElements() {
     "progressFill",
     "resetButton",
     "resultCopy",
+    "resultNextButton",
+    "resultPageLabel",
+    "resultPager",
+    "resultPrevButton",
     "resultStats",
     "resultTitle",
     "resultsPanel",
@@ -169,13 +153,6 @@ function bindElements() {
     "stepCollect",
     "stepConnect",
     "topAccount",
-    "walkthroughCloseButton",
-    "walkthroughCopy",
-    "walkthroughNextButton",
-    "walkthroughPanel",
-    "walkthroughStep",
-    "walkthroughTitle",
-    "walkthroughVisual",
     "verifiedCopy",
     "verifiedPanel",
     "verifiedTitle",
@@ -216,7 +193,6 @@ async function loadExternalConfig() {
 function attachEvents() {
   els.spotifyButton.addEventListener("click", () => connectService("spotify"));
   els.appleButton.addEventListener("click", () => connectService("apple"));
-  els.demoButton.addEventListener("click", startWalkthrough);
   els.homeButton.addEventListener("click", goHome);
   els.importButton.addEventListener("click", () => els.importFile.click());
   els.importFile.addEventListener("change", importBlendPack);
@@ -230,8 +206,8 @@ function attachEvents() {
   els.mashButton.addEventListener("click", mashInvite);
   els.logoutButton.addEventListener("click", logout);
   els.blendHistoryList.addEventListener("click", openBlendHistory);
-  els.walkthroughNextButton.addEventListener("click", advanceWalkthrough);
-  els.walkthroughCloseButton.addEventListener("click", goHome);
+  els.resultPrevButton.addEventListener("click", () => changeResultPage(-1));
+  els.resultNextButton.addEventListener("click", () => changeResultPage(1));
   window.addEventListener("hashchange", () => {
     if (state.busy) return;
     loadRouteFromLocation({ fromNavigation: true }).then(() => render());
@@ -246,8 +222,8 @@ async function loadRouteFromLocation({ fromNavigation = false } = {}) {
     return;
   }
 
-  if (route.screen === "walkthrough") {
-    state.walkthroughIndex = 0;
+  if (route.screen === "mash" && route.mashId) {
+    await openBlendById(route.mashId, { navigate: false });
     return;
   }
 
@@ -294,7 +270,7 @@ function parseCurrentRoute() {
 
   const route = rawHash.startsWith("/") ? rawHash : `/${rawHash}`;
   const parts = route.split("/").filter(Boolean);
-  if (parts[0] === "how-it-works") return { screen: "walkthrough", payload: "" };
+  if (parts[0] === "mash" && parts[1]) return { screen: "mash", mashId: parts[1], payload: "" };
   if (parts[0] === "spuddies" && parts[1]) {
     return {
       screen: parts[2] || "join",
@@ -312,7 +288,7 @@ function normalizeRoute() {
 }
 
 function routeForState() {
-  if (state.walkthroughIndex !== null) return "/how-it-works";
+  if (state.activeBlend) return `/mash/${encodeURIComponent(state.activeBlend.id)}`;
 
   const inviteRoute = inviteRoutePath();
   if (state.busy && state.loading.active) {
@@ -324,8 +300,8 @@ function routeForState() {
     return inviteRoute ? `${inviteRoute}/results` : "/results";
   }
   if (state.matches.length > 0) return "/results";
-  if (state.shareLink) return "/share";
   if (state.session) return "/account";
+  if (state.shareLink) return "/share";
   return "/";
 }
 
@@ -536,6 +512,10 @@ async function finishSpotifyConnection() {
   const accessToken = await getSpotifyAccessToken();
   state.session.profile = await fetchSpotifyProfile(accessToken);
   await connectPotatunesSpotify(accessToken);
+  if (await useStoredLibrarySnapshotIfFresh()) {
+    await finishCollection();
+    return;
+  }
   const tracks = await fetchSpotifySavedTracks(accessToken);
   state.session.tracks = dedupeTracks(tracks);
 
@@ -551,6 +531,7 @@ async function fetchSpotifyProfile(accessToken) {
   return {
     name: body.display_name || body.id || "Spotify listener",
     id: body.id,
+    avatarUrl: bestSpotifyImage(body.images),
     url: body.external_urls?.spotify,
   };
 }
@@ -649,6 +630,10 @@ async function connectApple() {
     };
     await connectPotatunesApple(userToken || music.musicUserToken || "");
     renderCollecting("Apple Music", 0, 4);
+    if (await useStoredLibrarySnapshotIfFresh()) {
+      await finishCollection();
+      return;
+    }
     const tracks = await fetchAppleLibrarySongs(music);
     state.session.tracks = dedupeTracks(await preferAppleLikedTracks(tracks, music));
     await finishCollection();
@@ -826,6 +811,7 @@ async function finishCollection() {
   state.invite = invite;
   sessionStorage.setItem(STORAGE.pendingInvite, JSON.stringify(invite));
   state.shareLink = state.myShareLink;
+  await refreshBlendHistory();
   markLoadingStepDone("generate", {
     copy: "Spud link ready.",
     counter: String(state.session.tracks.length),
@@ -873,6 +859,7 @@ async function mashInvite() {
 
     state.matches = matchTracks(state.invite.tracks, state.session.tracks);
     state.activeBlend = null;
+    state.resultPage = 1;
     state.mashComplete = true;
     markLoadingStepDone("mash", {
       copy: `${state.matches.length} overlaps mashed.`,
@@ -885,8 +872,12 @@ async function mashInvite() {
       counter: String(state.matches.length),
       showArtwork: false,
     });
-    await ensureMyInviteLink();
+    const backendBlend = await saveBackendBlendIfPossible();
+    if (backendBlend) {
+      activateApiBlend(backendBlend);
+    }
     saveCurrentBlendHistory();
+    await refreshBlendHistory();
     markLoadingStepDone("generate", {
       copy: "Blend ready.",
       counter: String(state.matches.length),
@@ -911,6 +902,7 @@ function createInviteFromSession() {
     host: {
       name: state.session.profile?.name || `${SERVICES[state.session.service].name} listener`,
       service: state.session.service,
+      avatarUrl: state.session.profile?.avatarUrl || "",
       sourceLabel: SERVICES[state.session.service].sourceLabel,
       count: state.session.tracks.length,
     },
@@ -938,26 +930,29 @@ async function ensureMyInviteLink() {
 }
 
 function compactTrackForInvite(track) {
+  const norm = track.norm || normalizeTrack(track);
   return {
     title: track.title,
     artists: track.artists,
     album: track.album,
     durationMs: track.durationMs,
     isrc: track.isrc,
-    normTitle: track.norm.title,
-    normArtists: track.norm.artists,
-    primaryArtist: track.norm.primaryArtist,
-    strictKey: track.norm.strictKey,
-    titleKey: track.norm.titleKey,
-    versionFlags: track.norm.versionFlags,
+    normTitle: norm.title,
+    normArtists: norm.artists,
+    primaryArtist: norm.primaryArtist,
+    strictKey: norm.strictKey,
+    titleKey: norm.titleKey,
+    versionFlags: norm.versionFlags,
   };
 }
 
 function compactTrackForSnapshot(track) {
+  const norm = track.norm || normalizeTrack(track);
   return {
     service: track.service,
     id: track.id,
     uri: track.uri,
+    providerTrackDbId: track.providerTrackDbId || "",
     title: track.title,
     artists: track.artists,
     album: track.album,
@@ -967,12 +962,12 @@ function compactTrackForSnapshot(track) {
     url: track.url,
     appleType: track.appleType,
     catalogId: track.catalogId,
-    normTitle: track.norm.title,
-    normArtists: track.norm.artists,
-    primaryArtist: track.norm.primaryArtist,
-    strictKey: track.norm.strictKey,
-    titleKey: track.norm.titleKey,
-    versionFlags: track.norm.versionFlags,
+    normTitle: norm.title,
+    normArtists: norm.artists,
+    primaryArtist: norm.primaryArtist,
+    strictKey: norm.strictKey,
+    titleKey: norm.titleKey,
+    versionFlags: norm.versionFlags,
   };
 }
 
@@ -980,20 +975,12 @@ async function createShortShareLink(invite) {
   if (!state.potatunesAuth?.session?.token || !apiBase()) return null;
 
   try {
-    const snapshotBody = await apiRequest("/api/library-snapshots", {
-      method: "POST",
-      auth: true,
-      body: {
-        provider: state.session.service,
-        sourceLabel: SERVICES[state.session.service].sourceLabel,
-        tracks: state.session.tracks.map(compactTrackForSnapshot),
-      },
-    });
+    const snapshot = await createLibrarySnapshotForSession();
     const inviteBody = await apiRequest("/api/invites", {
       method: "POST",
       auth: true,
       body: {
-        ownerSnapshotId: snapshotBody.snapshot.id,
+        ownerSnapshotId: snapshot.id,
       },
     });
     const slug = inviteBody.invite.slug;
@@ -1010,6 +997,66 @@ async function createShortShareLink(invite) {
   } catch {
     return null;
   }
+}
+
+async function createLibrarySnapshotForSession() {
+  if (state.session?.librarySnapshot && isLibrarySnapshotFresh(state.session.librarySnapshot)) {
+    return state.session.librarySnapshot;
+  }
+
+  const body = await apiRequest("/api/library-snapshots", {
+    method: "POST",
+    auth: true,
+    body: {
+      provider: state.session.service,
+      sourceLabel: SERVICES[state.session.service].sourceLabel,
+      tracks: state.session.tracks.map(compactTrackForSnapshot),
+    },
+  });
+  state.session.librarySnapshot = body.snapshot;
+  return body.snapshot;
+}
+
+async function useStoredLibrarySnapshotIfFresh() {
+  const snapshot = await fetchLatestLibrarySnapshot({ includeTracks: true }).catch(() => null);
+  if (!snapshot?.tracks?.length || !isLibrarySnapshotFresh(snapshot)) return false;
+
+  state.session.librarySnapshot = snapshot;
+  state.session.tracks = dedupeTracks(snapshot.tracks.map(trackFromSnapshot));
+  renderCollecting(serviceName(state.session.service), state.session.tracks.length, state.session.tracks.length);
+  markLoadingStepDone("yourSongs", {
+    copy: `${state.session.tracks.length} tunes loaded from your saved sack.`,
+    counter: String(state.session.tracks.length),
+    showArtwork: false,
+  });
+  await waitForPaint();
+  return true;
+}
+
+async function fetchLatestLibrarySnapshot({ includeTracks = false } = {}) {
+  if (!state.potatunesAuth?.user?.id || !state.potatunesAuth?.session?.token || !apiBase()) return null;
+  const query = includeTracks ? "?tracks=true" : "";
+  const body = await apiRequest(`/api/users/${encodeURIComponent(state.potatunesAuth.user.id)}/library-snapshot${query}`, {
+    auth: true,
+  });
+  return body.snapshot || null;
+}
+
+function isLibrarySnapshotFresh(snapshot) {
+  const createdAt = Date.parse(snapshot?.createdAt || "");
+  return Number.isFinite(createdAt) && Date.now() - createdAt < LIBRARY_REFRESH_COOLDOWN_MS;
+}
+
+function trackFromSnapshot(track) {
+  return toTrack({
+    ...track,
+    service: track.provider || state.session?.service || "unknown",
+    id: track.providerTrackId || track.id,
+    uri: track.uri,
+    providerTrackDbId: track.id || "",
+    artworkUrl: track.artworkUrl || "",
+    url: track.url || "",
+  });
 }
 
 async function createShareLink(invite) {
@@ -1070,6 +1117,7 @@ function normalizeApiInvite(invite, { includeTracks = false } = {}) {
     host: {
       name: invite.owner?.displayName || "A spuddy",
       service: hostService,
+      avatarUrl: invite.owner?.avatarUrl || "",
       sourceLabel: SERVICES[hostService]?.sourceLabel || "Songs",
       count: invite.owner?.trackCount || invite.tracks?.length || 0,
     },
@@ -1080,6 +1128,7 @@ function normalizeApiInvite(invite, { includeTracks = false } = {}) {
           service: hostService,
           id: track.providerTrackId || track.id,
           uri: track.uri,
+          providerTrackDbId: track.id || "",
           artworkUrl: track.artworkUrl || "",
           url: track.url || "",
         }),
@@ -1147,6 +1196,7 @@ function toTrack(input) {
     url: input.url || "",
     appleType: input.appleType || "library-songs",
     catalogId: input.catalogId || "",
+    providerTrackDbId: input.providerTrackDbId || input.provider_track_db_id || "",
   };
   track.norm = normalizeTrack(track);
   return track;
@@ -1920,6 +1970,7 @@ async function importBlendPack(event) {
       });
       await waitForPaint();
       state.matches = matchTracks(state.invite.tracks, state.session.tracks);
+      state.resultPage = 1;
       state.mashComplete = true;
       markLoadingStepDone("mash", {
         copy: `${state.matches.length} overlaps mashed.`,
@@ -1949,12 +2000,11 @@ async function importBlendPack(event) {
 function exportCsv() {
   if (!state.matches.length) return;
   const rows = [
-    ["Title", "Artists", "Album", "Confidence", "Matched title", "Matched artists"],
+    ["Title", "Artists", "Album", "Matched title", "Matched artists"],
     ...state.matches.map((match) => [
       match.yourTrack.title,
       match.yourTrack.artists.join(", "),
       match.yourTrack.album,
-      Math.round(match.score * 100),
       match.hostTrack.title,
       match.hostTrack.artists.join(", "),
     ]),
@@ -1968,12 +2018,13 @@ function exportCsv() {
 function saveCurrentBlendHistory() {
   if (!state.invite || !state.session || !state.matches.length) return;
 
-  const id = state.invite.blendId || crypto.randomUUID?.() || randomString(24);
+  const id = state.activeBlend?.id || state.invite.blendId || crypto.randomUUID?.() || randomString(24);
   const item = {
     id,
     matchedAt: new Date().toISOString(),
     friendName: state.invite.host?.name || "A friend",
     friendService: state.invite.host?.service || "unknown",
+    friendAvatarUrl: state.invite.host?.avatarUrl || "",
     myName: state.session.profile?.name || "Me",
     myService: state.session.service,
     hostTrackCount: state.invite.tracks?.length || 0,
@@ -1990,6 +2041,132 @@ function saveCurrentBlendHistory() {
   const next = [item, ...state.blendHistory.filter((blend) => blend.id !== id)].slice(0, 25);
   state.blendHistory = next;
   saveBlendHistory(next);
+}
+
+async function saveBackendBlendIfPossible() {
+  if (!state.potatunesAuth?.session?.token || !apiBase() || !state.invite?.slug || !state.session?.tracks?.length) {
+    return null;
+  }
+
+  try {
+    const snapshot = await createLibrarySnapshotForSession();
+    const body = await apiRequest("/api/blends", {
+      method: "POST",
+      auth: true,
+      body: {
+        inviteSlug: state.invite.slug,
+        guestSnapshotId: snapshot.id,
+        matches: state.matches.map(backendMatchPayload),
+      },
+    });
+    return body.blend || null;
+  } catch (error) {
+    const code = error.data?.code;
+    if ((code === "blend_already_exists" || code === "blend_refresh_available") && error.data?.existingBlend?.id) {
+      const blend = await fetchBlendById(error.data.existingBlend.id).catch(() => null);
+      setStatus(error.message, code === "blend_refresh_available" ? "info" : "error");
+      return blend;
+    }
+    return null;
+  }
+}
+
+function backendMatchPayload(match) {
+  const preferred = preferredTrack(match);
+  return {
+    title: preferred.title,
+    artists: preferred.artists,
+    isrc: preferred.isrc || match.hostTrack.isrc || match.yourTrack.isrc || "",
+    score: match.score,
+    reason: match.reason,
+    hostTrack: compactTrackForSnapshot(match.hostTrack),
+    guestTrack: compactTrackForSnapshot(match.yourTrack),
+  };
+}
+
+async function refreshBlendHistory() {
+  const localHistory = loadBlendHistory();
+  if (!state.potatunesAuth?.user?.id || !state.potatunesAuth?.session?.token || !apiBase()) {
+    state.blendHistory = localHistory;
+    return;
+  }
+
+  try {
+    const body = await apiRequest(`/api/users/${encodeURIComponent(state.potatunesAuth.user.id)}/blends?limit=25`, {
+      auth: true,
+    });
+    const remote = (body.blends || []).map(blendSummaryFromApi).filter((blend) => !isSampleBlend(blend));
+    const remoteIds = new Set(remote.map((blend) => blend.id));
+    state.blendHistory = [...remote, ...localHistory.filter((blend) => !remoteIds.has(blend.id))].slice(0, 25);
+  } catch {
+    state.blendHistory = localHistory;
+  }
+}
+
+async function fetchBlendById(blendId) {
+  const body = await apiRequest(`/api/blends/${encodeURIComponent(blendId)}`, {
+    auth: true,
+  });
+  return body.blend || null;
+}
+
+function blendSummaryFromApi(blend) {
+  const currentUserId = state.potatunesAuth?.user?.id || "";
+  const friend = blend.friend || (blend.host?.id === currentUserId ? blend.guest : blend.host) || {};
+  const me = blend.host?.id === friend.id ? blend.guest : blend.host;
+  return {
+    id: blend.id,
+    source: "api",
+    matchedAt: blend.createdAt,
+    friendName: friend.displayName || "A spuddy",
+    friendService: friend.provider || "unknown",
+    friendAvatarUrl: friend.avatarUrl || "",
+    myName: me?.displayName || state.session?.profile?.name || "Me",
+    myService: me?.provider || state.session?.service || "unknown",
+    hostTrackCount: 0,
+    myTrackCount: 0,
+    matchCount: blend.matchCount || 0,
+    matches: [],
+  };
+}
+
+function activateApiBlend(blend) {
+  if (!blend) return;
+  const summary = blendSummaryFromApi(blend);
+  state.activeBlend = {
+    ...summary,
+    hostName: blend.host?.displayName || "A spuddy",
+    hostService: blend.host?.provider || "unknown",
+    guestName: blend.guest?.displayName || "A spuddy",
+    guestService: blend.guest?.provider || "unknown",
+    matches: (blend.tracks || []).map((track) => matchFromApiBlendTrack(track, blend)),
+  };
+  state.matches = state.activeBlend.matches;
+  state.resultPage = 1;
+  state.readyToMash = false;
+  state.mashComplete = true;
+}
+
+function matchFromApiBlendTrack(track, blend) {
+  const displayTrack = {
+    title: track.title || "Untitled",
+    artists: Array.isArray(track.artists) && track.artists.length ? track.artists : ["Unknown artist"],
+    isrc: track.isrc || "",
+  };
+  return {
+    score: Number(track.score || 0),
+    reason: track.reason || "",
+    hostTrack: toTrack({
+      ...displayTrack,
+      service: blend.host?.provider || "unknown",
+      id: "",
+    }),
+    yourTrack: toTrack({
+      ...displayTrack,
+      service: blend.guest?.provider || "unknown",
+      id: "",
+    }),
+  };
 }
 
 function compactHistoryTrack(track) {
@@ -2012,7 +2189,13 @@ function compactHistoryTrack(track) {
 function loadBlendHistory() {
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE.blendHistory) || "[]");
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) {
+      saveBlendHistory([]);
+      return [];
+    }
+    const history = Array.isArray(parsed) ? parsed.filter((blend) => !isSampleBlend(blend)) : [];
+    if (history.length !== parsed.length) saveBlendHistory(history);
+    return history;
   } catch {
     return [];
   }
@@ -2020,20 +2203,47 @@ function loadBlendHistory() {
 
 function saveBlendHistory(history) {
   try {
-    localStorage.setItem(STORAGE.blendHistory, JSON.stringify(history));
+    localStorage.setItem(STORAGE.blendHistory, JSON.stringify(history.filter((blend) => !isSampleBlend(blend))));
   } catch {
     // Local blend history is optional.
   }
 }
 
-function openBlendHistory(event) {
+function isSampleBlend(blend) {
+  return /sample .*spud/i.test(`${blend?.friendName || ""} ${blend?.myName || ""}`);
+}
+
+async function openBlendHistory(event) {
   const button = event.target.closest("[data-blend-id]");
   if (!button) return;
+  await openBlendById(button.dataset.blendId, { navigate: true });
+}
 
-  const item = state.blendHistory.find((blend) => blend.id === button.dataset.blendId);
+async function openBlendById(blendId, { navigate = true } = {}) {
+  const item = state.blendHistory.find((blend) => blend.id === blendId);
+  if (!item && !state.potatunesAuth?.session?.token) return;
+
+  if ((!item || item.source === "api" || !item.matches?.length) && state.potatunesAuth?.session?.token && apiBase()) {
+    try {
+      const blend = await fetchBlendById(blendId);
+      if (blend) {
+        activateApiBlend(blend);
+        els.statusLog.classList.add("hidden");
+        if (navigate) setRoute(`/mash/${encodeURIComponent(blend.id)}`, { replace: false });
+        render();
+        return;
+      }
+    } catch {
+      setStatus("That mash could not be opened.", "error");
+      render();
+      return;
+    }
+  }
+
   if (!item) return;
 
   state.activeBlend = item;
+  state.resultPage = 1;
   state.matches = item.matches.map((match) => ({
     score: match.score,
     reason: match.reason,
@@ -2047,6 +2257,7 @@ function openBlendHistory(event) {
     host: {
       name: item.friendName,
       service: item.friendService,
+      avatarUrl: item.friendAvatarUrl || "",
       count: item.hostTrackCount,
     },
     tracks: item.matches.map((match) => toTrack(match.hostTrack)),
@@ -2054,7 +2265,8 @@ function openBlendHistory(event) {
   state.invitePayload = "";
   state.readyToMash = false;
   state.mashComplete = true;
-  setStatus(`Opened blend with ${item.friendName}.`, "info");
+  els.statusLog.classList.add("hidden");
+  if (navigate) setRoute(`/mash/${encodeURIComponent(item.id)}`, { replace: false });
   render();
 }
 
@@ -2066,57 +2278,6 @@ function downloadFile(filename, content, type) {
   anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
-}
-
-async function loadDemo() {
-  state.walkthroughIndex = null;
-  const hostTracks = [
-    ["Mash Potato Moonlight - Radio Edit", ["The Tater Tots"], "Couch Crop", 201000, "USPT10000001"],
-    ["Gravy Groove", ["Yukon Golds"], "Boil Point", 185000, "USPT10000002"],
-    ["Eyes on You (2018 Remaster)", ["The Spudniks"], "Window Sill", 218000, "USPT10000003"],
-    ["Hot Potato", ["Noah Frye"], "Snack Time", 174000, "USPT10000004"],
-    ["Couch Sprout", ["Ari Hash"], "Blanket Season", 206000, "USPT10000005"],
-  ].map(([title, artists, album, durationMs, isrc]) =>
-    toTrack({ service: "spotify", title, artists, album, durationMs, isrc }),
-  );
-
-  const guestTracks = [
-    ["Mash Potato Moonlight", ["The Tater Tots"], "Couch Crop", 200000, "USPT10000001"],
-    ["Eyes on You", ["Spudniks"], "Window Sill", 217000, "USPT10000003"],
-    ["Hot Potato (Acoustic)", ["Noah Frye"], "Porch Fries", 178000, ""],
-    ["Tiny Yam Jam", ["Jules Hash"], "Root Cellar", 194000, ""],
-    ["Gravy Groove (feat. Rui)", ["Yukon Golds"], "Boil Point", 184000, "USPT10000002"],
-  ].map(([title, artists, album, durationMs, isrc]) =>
-    toTrack({ service: "apple", title, artists, album, durationMs, isrc, id: title, appleType: "library-songs" }),
-  );
-
-  state.invite = {
-    v: 1,
-    blendId: crypto.randomUUID?.() || randomString(24),
-    createdAt: new Date().toISOString(),
-    host: {
-      name: "Sample Spotify spud",
-      service: "spotify",
-      sourceLabel: "Saved tracks",
-      count: hostTracks.length,
-    },
-    tracks: hostTracks,
-  };
-  state.invitePayload = "";
-  state.session = {
-    service: "apple",
-    profile: { name: "Sample Apple Music spud" },
-    tracks: guestTracks,
-  };
-  state.matches = matchTracks(hostTracks, guestTracks);
-  state.readyToMash = false;
-  state.mashComplete = true;
-  state.myInvite = createInviteFromSession();
-  state.myShareLink = await createShareLink(state.myInvite);
-  state.shareLink = state.myShareLink;
-  saveCurrentBlendHistory();
-  setStatus("Sample spuds loaded.", "info");
-  render();
 }
 
 function clearSession({ clearAuth = false } = {}) {
@@ -2137,7 +2298,7 @@ function clearSession({ clearAuth = false } = {}) {
   state.myInvite = null;
   state.myShareLink = "";
   state.activeBlend = null;
-  state.walkthroughIndex = null;
+  state.resultPage = 1;
   state.invitePayload = "";
   state.readyToMash = false;
   state.mashComplete = false;
@@ -2146,6 +2307,21 @@ function clearSession({ clearAuth = false } = {}) {
 }
 
 function goHome() {
+  if (state.session) {
+    state.invite = null;
+    state.matches = [];
+    state.activeBlend = null;
+    state.invitePayload = "";
+    state.readyToMash = false;
+    state.mashComplete = false;
+    state.resultPage = 1;
+    sessionStorage.removeItem(STORAGE.pendingInvite);
+    sessionStorage.removeItem(STORAGE.pendingInvitePayload);
+    els.statusLog.classList.add("hidden");
+    setRoute("/account");
+    render();
+    return;
+  }
   clearSession();
   els.statusLog.classList.add("hidden");
   render();
@@ -2160,23 +2336,6 @@ function logout() {
 function resetSession() {
   clearSession({ clearAuth: true });
   setStatus("Session reset.", "info");
-  render();
-}
-
-function startWalkthrough() {
-  clearSession();
-  state.walkthroughIndex = 0;
-  els.statusLog.classList.add("hidden");
-  render();
-}
-
-function advanceWalkthrough() {
-  if (state.walkthroughIndex === null) return;
-  if (state.walkthroughIndex >= WALKTHROUGH_STEPS.length - 1) {
-    loadDemo();
-    return;
-  }
-  state.walkthroughIndex += 1;
   render();
 }
 
@@ -2231,7 +2390,6 @@ function render() {
   renderInviteIntro();
   renderVerifiedPanel();
   renderLoadingPanel();
-  renderWalkthrough();
   renderSteps();
   renderBackButton();
   renderButtons();
@@ -2272,23 +2430,21 @@ function renderModeBanner() {
 function renderPanels() {
   const hasSession = Boolean(state.session);
   const hasInvite = Boolean(state.invite);
-  const isWalking = state.walkthroughIndex !== null;
-  const isHosting = Boolean(hasSession && state.shareLink && state.matches.length === 0);
   const isJoinFlow = Boolean(hasSession && hasInvite && !state.shareLink);
   const isVerified = Boolean(isJoinFlow && state.readyToMash && !state.mashComplete);
   const hasJoinResults = Boolean(isJoinFlow && state.mashComplete);
+  const showResults = hasJoinResults || state.matches.length > 0;
   const loading = state.busy && state.loading.active;
 
-  els.connectPanel.classList.toggle("hidden", loading || hasSession || isWalking);
-  els.accountPanel.classList.toggle("hidden", loading || !hasSession || isJoinFlow);
+  els.connectPanel.classList.toggle("hidden", loading || hasSession || showResults);
+  els.accountPanel.classList.toggle("hidden", loading || !hasSession || isJoinFlow || showResults);
   els.libraryPanel.classList.toggle("hidden", !loading);
-  els.verifiedPanel.classList.toggle("hidden", loading || !isVerified || isWalking);
-  els.invitePanel.classList.toggle("hidden", loading || !isHosting);
-  els.resultsPanel.classList.toggle("hidden", loading || !(hasJoinResults || state.matches.length > 0));
+  els.verifiedPanel.classList.toggle("hidden", loading || !isVerified);
+  els.invitePanel.classList.add("hidden");
+  els.resultsPanel.classList.toggle("hidden", loading || !showResults);
 
-  if (isHosting) renderInvitePanel();
-  if (hasSession && !isJoinFlow) renderAccountPanel();
-  if (hasJoinResults || state.matches.length > 0) renderResults();
+  if (hasSession && !isJoinFlow && !showResults) renderAccountPanel();
+  if (showResults) renderResults();
 }
 
 function renderInviteIntro() {
@@ -2319,19 +2475,17 @@ function renderBackButton() {
     !state.session &&
     !state.shareLink &&
     !state.matches.length &&
-    !state.activeBlend &&
-    state.walkthroughIndex === null;
+    !state.activeBlend;
   els.homeButton.classList.toggle("hidden", isHome);
 }
 
 function renderAccountPanel() {
   const name = state.session?.profile?.name || "Potatunes listener";
   const service = serviceName(state.session?.service);
-  const count = state.session?.tracks?.length || 0;
-  els.accountSummary.textContent = `${name} (${service}) - ${count} tune${count === 1 ? "" : "s"}`;
+  els.accountSummary.textContent = `${name} (${service})`;
 
   if (!state.blendHistory.length) {
-    els.blendHistoryList.innerHTML = `<p class="empty-copy">No blended playlists yet.</p>`;
+    els.blendHistoryList.innerHTML = `<p class="empty-copy">No spuddy blends yet.</p>`;
     return;
   }
 
@@ -2343,55 +2497,31 @@ function renderAccountPanel() {
       });
       return `
         <button class="blend-history-item" type="button" data-blend-id="${escapeAttribute(blend.id)}">
-          <span>
-            <strong>${escapeHtml(blend.friendName)}</strong>
-            <small>${escapeHtml(serviceName(blend.friendService))} - ${escapeHtml(when)}</small>
+          ${friendAvatarHtml(blend)}
+          <span class="blend-history-copy">
+            <strong>${escapeHtml(blend.friendName)} (${escapeHtml(serviceName(blend.friendService))})</strong>
+            <small>${escapeHtml(when)}</small>
           </span>
-          <em>${escapeHtml(blend.matchCount)} shared</em>
+          <em>${escapeHtml(blend.matchCount)}</em>
         </button>
       `;
     })
     .join("");
 }
 
-function renderWalkthrough() {
-  if (state.walkthroughIndex === null) {
-    els.walkthroughPanel.classList.add("hidden");
-    return;
-  }
-
-  const step = WALKTHROUGH_STEPS[state.walkthroughIndex];
-  els.walkthroughPanel.classList.remove("hidden");
-  els.walkthroughStep.textContent = `Step ${state.walkthroughIndex + 1} of ${WALKTHROUGH_STEPS.length}`;
-  els.walkthroughTitle.textContent = step.title;
-  els.walkthroughCopy.textContent = step.copy;
-  els.walkthroughNextButton.textContent = step.button;
-  els.walkthroughVisual.className = `walkthrough-scene ${step.scene}`;
-  els.walkthroughVisual.innerHTML = walkthroughVisualHtml(step.scene);
-}
-
-function walkthroughVisualHtml(scene) {
-  if (scene === "login") {
+function friendAvatarHtml(blend) {
+  if (blend.friendAvatarUrl) {
     return `
-      <span class="walk-potato"></span>
-      <span class="walk-service walk-spotify"><span></span></span>
-      <span class="walk-service walk-apple"><span></span></span>
+      <span class="friend-avatar">
+        <img src="${escapeAttribute(blend.friendAvatarUrl)}" alt="" loading="lazy" />
+      </span>
     `;
   }
-  if (scene === "share") {
-    return `
-      <span class="walk-potato walk-left"></span>
-      <span class="walk-link"><i data-lucide="link"></i></span>
-      <span class="walk-potato walk-right"></span>
-    `;
-  }
+
+  const service = blend.friendService === "spotify" ? "spotify-logo" : "apple-logo";
   return `
-    <span class="walk-potato walk-left"></span>
-    <span class="walk-potato walk-right"></span>
-    <span class="walk-playlist">
-      <span></span>
-      <span></span>
-      <span></span>
+    <span class="friend-avatar service-avatar">
+      <span class="service-icon ${service}" aria-hidden="true"><span></span></span>
     </span>
   `;
 }
@@ -2410,28 +2540,50 @@ function renderInvitePanel() {
 function renderResults() {
   const activeBlend = state.activeBlend;
   const matchCount = state.matches.length;
+  const totalPages = Math.max(1, Math.ceil(matchCount / RESULTS_PAGE_SIZE));
+  state.resultPage = clamp(state.resultPage || 1, 1, totalPages);
+  const pageStart = (state.resultPage - 1) * RESULTS_PAGE_SIZE;
+  const pageMatches = state.matches.slice(pageStart, pageStart + RESULTS_PAGE_SIZE);
+
   els.matchCount.textContent = matchCount;
-  els.resultTitle.textContent = matchCount
-    ? activeBlend
-      ? `${matchCount} tune${matchCount === 1 ? "" : "s"} with ${activeBlend.friendName}`
-      : `${matchCount} tune${matchCount === 1 ? "" : "s"} in the same sack`
-    : "No shared spuds yet";
+  els.resultTitle.textContent = activeBlend
+    ? mashTitle(activeBlend)
+    : matchCount
+      ? `${matchCount} tune${matchCount === 1 ? "" : "s"} in the same sack`
+      : "No shared spuds yet";
   els.resultCopy.textContent = matchCount
-    ? "Plant the playlist where you want it."
+    ? activeBlend
+      ? "All the songs you both mashed."
+      : "Plant the playlist where you want it."
     : "No musical potatoes overlapped this time.";
 
-  const hostCount = activeBlend?.hostTrackCount || state.invite?.tracks?.length || 0;
-  const guestCount = activeBlend?.myTrackCount || state.session?.tracks?.length || 0;
-  els.resultStats.innerHTML = [
-    statHtml(hostCount, `${serviceName(activeBlend?.friendService || state.invite?.host?.service)} potatoes`),
-    statHtml(guestCount, `${serviceName(activeBlend?.myService || state.session?.service)} potatoes`),
-    statHtml(matchCount, "Shared spuds"),
-  ].join("");
+  els.resultStats.classList.toggle("hidden", Boolean(activeBlend));
+  els.resultStats.innerHTML = activeBlend
+    ? ""
+    : [
+      statHtml(state.invite?.tracks?.length || 0, `${serviceName(state.invite?.host?.service)} potatoes`),
+      statHtml(state.session?.tracks?.length || 0, `${serviceName(state.session?.service)} potatoes`),
+      statHtml(matchCount, "Shared spuds"),
+    ].join("");
 
-  els.matchList.innerHTML = state.matches
-    .slice(0, 120)
+  els.matchList.innerHTML = pageMatches
     .map((match) => matchRowHtml(match))
     .join("") || `<div class="notice">No matches found. Try exporting both libraries and reviewing titles manually.</div>`;
+
+  els.resultPager.classList.toggle("hidden", totalPages <= 1);
+  els.resultPageLabel.textContent = `Page ${state.resultPage} of ${totalPages}`;
+  els.resultPrevButton.disabled = state.busy || state.resultPage <= 1;
+  els.resultNextButton.disabled = state.busy || state.resultPage >= totalPages;
+}
+
+function mashTitle(blend) {
+  const left = blend.myName || state.session?.profile?.name || "You";
+  const right = blend.friendName || "Spuddy";
+  return `${left} & ${possessive(right)} mash`;
+}
+
+function possessive(name) {
+  return `${name}${/s$/i.test(name) ? "'" : "'s"}`;
 }
 
 function statHtml(value, label) {
@@ -2450,9 +2602,16 @@ function matchRowHtml(match) {
         <strong>${escapeHtml(track.title)}</strong>
         <span>${escapeHtml(track.artists.join(", "))}${track.album ? ` &middot; ${escapeHtml(track.album)}` : ""}</span>
       </div>
-      <span class="confidence">${Math.round(match.score * 100)}%</span>
     </article>
   `;
+}
+
+function changeResultPage(delta) {
+  const totalPages = Math.max(1, Math.ceil(state.matches.length / RESULTS_PAGE_SIZE));
+  state.resultPage = clamp((state.resultPage || 1) + delta, 1, totalPages);
+  renderResults();
+  renderButtons();
+  if (window.lucide) window.lucide.createIcons();
 }
 
 function renderSteps() {
@@ -2475,7 +2634,6 @@ function renderButtons() {
   [
     els.appleButton,
     els.spotifyButton,
-    els.demoButton,
     els.homeButton,
     els.importButton,
     els.mashButton,
@@ -2486,8 +2644,8 @@ function renderButtons() {
     els.exportCsvButton,
     els.spotifyExportButton,
     els.appleExportButton,
-    els.walkthroughNextButton,
-    els.walkthroughCloseButton,
+    els.resultPrevButton,
+    els.resultNextButton,
   ].forEach((button) => {
     button.disabled = disabled;
   });
@@ -2499,6 +2657,9 @@ function renderButtons() {
   els.exportCsvButton.disabled = disabled || !state.matches.length;
   els.spotifyExportButton.disabled = disabled || !state.matches.length;
   els.appleExportButton.disabled = disabled || !state.matches.length;
+  const totalPages = Math.max(1, Math.ceil(state.matches.length / RESULTS_PAGE_SIZE));
+  els.resultPrevButton.disabled = disabled || state.resultPage <= 1;
+  els.resultNextButton.disabled = disabled || state.resultPage >= totalPages;
 }
 
 function renderCollecting(serviceNameText, count, total) {
@@ -2748,7 +2909,10 @@ async function apiRequest(path, { method = "GET", body, auth = false } = {}) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.error || "Potatunes backend request failed.");
+    const error = new Error(data.error || "Potatunes backend request failed.");
+    error.status = response.status;
+    error.data = data;
+    throw error;
   }
   return data;
 }

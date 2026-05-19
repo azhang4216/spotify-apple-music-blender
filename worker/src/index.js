@@ -2,6 +2,7 @@ const MAX_APPLE_TOKEN_TTL_SECONDS = 15_777_000;
 const MAX_SNAPSHOT_TRACKS = 12_000;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const BLEND_REFRESH_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
+const LIBRARY_REFRESH_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
 const PROVIDERS = new Set(["spotify", "apple"]);
 const EXPORT_PROVIDERS = new Set(["spotify", "apple", "csv"]);
 
@@ -116,6 +117,12 @@ async function handleApi(request, env, url, corsHeaders) {
   if (resource === "users" && request.method === "GET" && id && child === "invites") {
     assertSessionUser(requireSession(session), id);
     return json({ invites: await listUserInvites(db, id, url) }, 200, corsHeaders);
+  }
+
+  if (resource === "users" && request.method === "GET" && id && child === "library-snapshot") {
+    assertSessionUser(requireSession(session), id);
+    const includeTracks = url.searchParams.get("tracks") === "true";
+    return json({ snapshot: await getLatestLibrarySnapshot(db, id, includeTracks) }, 200, corsHeaders);
   }
 
   if (resource === "library-snapshots" && request.method === "POST" && !id) {
@@ -324,6 +331,11 @@ async function createLibrarySnapshot(db, body) {
     throw new ApiError(400, "Snapshot provider must match the user provider.");
   }
 
+  const existing = await latestLibrarySnapshotRow(db, userId);
+  if (existing && isLibrarySnapshotFresh(existing)) {
+    return serializeSnapshot(existing);
+  }
+
   const tracks = Array.isArray(body.tracks) ? body.tracks : [];
   if (!tracks.length) throw new ApiError(400, "tracks must include at least one song.");
   if (tracks.length > MAX_SNAPSHOT_TRACKS) {
@@ -442,6 +454,26 @@ async function getLibrarySnapshot(db, snapshotId) {
     ...snapshot,
     tracks: await getSnapshotTracks(db, snapshotId),
   };
+}
+
+async function getLatestLibrarySnapshot(db, userId, includeTracks) {
+  await findRequired(db, "users", userId);
+  const row = await latestLibrarySnapshotRow(db, userId);
+  if (!row) return null;
+  const snapshot = serializeSnapshot(row);
+  return includeTracks ? { ...snapshot, tracks: await getSnapshotTracks(db, snapshot.id) } : snapshot;
+}
+
+async function latestLibrarySnapshotRow(db, userId) {
+  return await db
+    .prepare("SELECT * FROM library_snapshots WHERE user_id = ? ORDER BY created_at DESC LIMIT 1")
+    .bind(userId)
+    .first();
+}
+
+function isLibrarySnapshotFresh(row) {
+  const createdAtMs = Date.parse(row.created_at);
+  return Number.isFinite(createdAtMs) && Date.now() - createdAtMs < LIBRARY_REFRESH_COOLDOWN_MS;
 }
 
 async function createInvite(db, body) {
@@ -907,6 +939,8 @@ function serializeUser(row) {
 }
 
 function serializeSnapshot(row) {
+  const createdAtMs = Date.parse(row.created_at);
+  const refreshAtMs = Number.isFinite(createdAtMs) ? createdAtMs + LIBRARY_REFRESH_COOLDOWN_MS : Date.now();
   return {
     id: row.id,
     userId: row.user_id,
@@ -914,6 +948,8 @@ function serializeSnapshot(row) {
     sourceLabel: row.source_label || "",
     trackCount: row.track_count,
     createdAt: row.created_at,
+    canRefresh: Date.now() >= refreshAtMs,
+    refreshAvailableAt: new Date(refreshAtMs).toISOString(),
   };
 }
 
