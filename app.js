@@ -2,6 +2,7 @@ const STORAGE = {
   spotifyToken: "potatunes.spotifyToken",
   spotifyOAuth: "potatunes.spotifyOAuth",
   pendingInvite: "potatunes.pendingInvite",
+  pendingInvitePayload: "potatunes.pendingInvitePayload",
   appleUserToken: "potatunes.appleUserToken",
   appSnapshot: "potatunes.appSnapshot",
   blendHistory: "potatunes.blendHistory",
@@ -242,6 +243,7 @@ async function loadRouteFromLocation({ fromNavigation = false } = {}) {
     const pending = sessionStorage.getItem(STORAGE.pendingInvite);
     if (pending) {
       state.invite = safeJsonParse(pending);
+      state.invitePayload = sessionStorage.getItem(STORAGE.pendingInvitePayload) || "";
     }
     return;
   }
@@ -262,6 +264,7 @@ async function loadRouteFromLocation({ fromNavigation = false } = {}) {
       state.mashComplete = false;
     }
     sessionStorage.setItem(STORAGE.pendingInvite, JSON.stringify(invite));
+    sessionStorage.setItem(STORAGE.pendingInvitePayload, route.payload);
     normalizeRoute();
   } catch {
     setStatus("That spud link could not be opened. Try importing a sack instead.", "error");
@@ -336,6 +339,7 @@ async function connectService(service) {
       return;
     }
     sessionStorage.setItem(STORAGE.pendingInvite, JSON.stringify(state.invite));
+    if (state.invitePayload) sessionStorage.setItem(STORAGE.pendingInvitePayload, state.invitePayload);
     if (getStoredItem(STORAGE.spotifyToken)) {
       try {
         setBusy(true);
@@ -419,6 +423,7 @@ async function handleSpotifyCallback() {
 
   const pending = sessionStorage.getItem(STORAGE.pendingInvite);
   if (pending) state.invite = safeJsonParse(pending);
+  state.invitePayload = sessionStorage.getItem(STORAGE.pendingInvitePayload) || state.invitePayload;
 
   try {
     setBusy(true, "Finishing Spotify sign-in...");
@@ -1935,6 +1940,7 @@ async function loadDemo() {
 function clearSession({ clearAuth = false } = {}) {
   sessionStorage.removeItem(STORAGE.spotifyOAuth);
   sessionStorage.removeItem(STORAGE.pendingInvite);
+  sessionStorage.removeItem(STORAGE.pendingInvitePayload);
   sessionStorage.removeItem(STORAGE.appSnapshot);
   if (clearAuth) {
     removeStoredItem(STORAGE.spotifyToken);
