@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Potatunes mashes Spotify liked songs and Apple Music library songs into one shared playlist."
+    />
+    <title>Potatunes</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M18 12c12-9 34 1 38 18 4 18-12 29-28 27C12 55 3 42 9 27c2-6 5-11 9-15z' fill='%23d7a45f'/%3E%3Ccircle cx='26' cy='28' r='3' fill='%236f4a25'/%3E%3Ccircle cx='40' cy='29' r='3' fill='%236f4a25'/%3E%3Cpath d='M27 40c5 4 11 4 16 0' fill='none' stroke='%236f4a25' stroke-width='4' stroke-linecap='round'/%3E%3Ccircle cx='18' cy='21' r='2' fill='%23a8793e'/%3E%3Ccircle cx='48' cy='42' r='2' fill='%23a8793e'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="https://js-cdn.music.apple.com/musickit/v1/musickit.js" defer></script>
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js" defer></script>
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar" aria-label="Application header">
+        <a class="brand" href="./" aria-label="Potatunes home">
+          <span class="brand-mark" aria-hidden="true">
+            <span class="potato-eye eye-left"></span>
+            <span class="potato-eye eye-right"></span>
+            <span class="potato-mouth"></span>
+          </span>
+          <span>
+            <strong>Potatunes</strong>
+            <small>Music mash-up</small>
+          </span>
+        </a>
+        <div class="top-actions">
+          <span id="configBadge" class="status-pill neutral hidden">Checking setup</span>
+          <button id="homeButton" class="nav-button" type="button">
+            <i data-lucide="house"></i>
+            Home
+          </button>
+          <button id="resetButton" class="icon-button" type="button" title="Reset session">
+            <i data-lucide="rotate-ccw"></i>
+          </button>
+        </div>
+      </header>
+
+      <main class="app-layout">
+        <section class="workspace" aria-labelledby="appTitle">
+          <div class="intro-block">
+            <div>
+              <p class="eyebrow">Mash your music</p>
+              <h1 id="appTitle">Potatunes</h1>
+              <p class="hero-copy">Pick an app. Send a link. Mash your shared faves.</p>
+            </div>
+            <div class="mini-stack" aria-hidden="true">
+              <span class="cover cover-a"><span></span></span>
+              <span class="cover cover-b"><span></span></span>
+              <span class="cover cover-c"><span></span></span>
+            </div>
+          </div>
+
+          <div id="modeBanner" class="mode-banner hidden"></div>
+
+          <ol class="steps" aria-label="Mash progress">
+            <li id="stepConnect" class="active">
+              <span>1</span>
+              <p>Pick</p>
+            </li>
+            <li id="stepCollect">
+              <span>2</span>
+              <p>Toss</p>
+            </li>
+            <li id="stepBlend">
+              <span>3</span>
+              <p>Mash</p>
+            </li>
+          </ol>
+
+          <section id="connectPanel" class="panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="connectTitle">Start the mash</h2>
+                <p id="connectCopy"></p>
+              </div>
+              <i data-lucide="sprout" aria-hidden="true"></i>
+            </div>
+
+            <div class="service-grid">
+              <button id="spotifyButton" class="service-button spotify" type="button">
+                <span class="service-icon spotify-logo" aria-hidden="true"><span></span></span>
+                <span>
+                  <strong>Continue with Spotify</strong>
+                  <small>Your green spuds</small>
+                </span>
+              </button>
+              <button id="appleButton" class="service-button apple" type="button">
+                <span class="service-icon apple-logo" aria-hidden="true"><span></span></span>
+                <span>
+                  <strong>Continue with Apple Music</strong>
+                  <small>Your red spuds</small>
+                </span>
+              </button>
+            </div>
+
+            <div class="utility-row">
+              <button id="demoButton" class="ghost-button" type="button">
+                <i data-lucide="circle-help"></i>
+                How does it work?
+              </button>
+              <button id="importButton" class="ghost-button quiet-import" type="button">
+                <i data-lucide="upload"></i>
+                Import sack
+              </button>
+              <input id="importFile" class="hidden" type="file" accept="application/json,.json" />
+            </div>
+          </section>
+
+          <section id="walkthroughPanel" class="panel walkthrough-panel hidden">
+            <div class="walkthrough-scene" id="walkthroughVisual" aria-hidden="true"></div>
+            <div>
+              <p id="walkthroughStep" class="walkthrough-step">Step 1 of 3</p>
+              <h2 id="walkthroughTitle">Pick your app</h2>
+              <p id="walkthroughCopy">Potatunes digs up your saved songs.</p>
+            </div>
+            <div class="action-row">
+              <button id="walkthroughNextButton" class="primary-button" type="button">
+                Next
+              </button>
+              <button id="walkthroughCloseButton" class="secondary-button" type="button">
+                Back home
+              </button>
+            </div>
+          </section>
+
+          <section id="libraryPanel" class="panel hidden" aria-live="polite">
+            <div class="panel-heading">
+              <div>
+                <h2 id="libraryTitle">Digging up songs</h2>
+                <p id="libraryCopy">A short potato pause.</p>
+              </div>
+              <span id="libraryCounter" class="big-count">0</span>
+            </div>
+            <div class="progress-track" aria-hidden="true">
+              <span id="progressFill"></span>
+            </div>
+            <div id="sampleArtwork" class="art-strip" aria-label="Sample album artwork"></div>
+          </section>
+
+          <section id="invitePanel" class="panel hidden">
+            <div class="panel-heading">
+              <div>
+                <h2>Send the hot potato</h2>
+                <p id="inviteCopy">They open it and pick their app.</p>
+              </div>
+              <span id="inviteCount" class="big-count">0</span>
+            </div>
+            <label class="copy-field">
+              <span>Mash link</span>
+              <textarea id="inviteLink" readonly rows="4"></textarea>
+            </label>
+            <div id="linkWarning" class="notice hidden"></div>
+            <div class="action-row">
+              <button id="copyInviteButton" class="primary-button" type="button">
+                <i data-lucide="copy"></i>
+                Copy potato
+              </button>
+              <button id="downloadPackButton" class="secondary-button" type="button">
+                <i data-lucide="download"></i>
+                Download sack
+              </button>
+            </div>
+          </section>
+
+          <section id="resultsPanel" class="panel hidden">
+            <div class="panel-heading">
+              <div>
+                <h2 id="resultTitle">Mashed hits</h2>
+                <p id="resultCopy">Save the good spuds.</p>
+              </div>
+              <span id="matchCount" class="big-count">0</span>
+            </div>
+            <div id="resultStats" class="stat-grid"></div>
+            <div class="action-row export-row" aria-label="Save playlist">
+              <button id="spotifyExportButton" class="primary-button spotify-save" type="button">
+                <i data-lucide="music-2"></i>
+                Plant in Spotify
+              </button>
+              <button id="appleExportButton" class="primary-button apple-save" type="button">
+                <i data-lucide="badge-music"></i>
+                Plant in Apple Music
+              </button>
+              <button id="exportCsvButton" class="secondary-button" type="button">
+                <i data-lucide="table"></i>
+                Export CSV
+              </button>
+            </div>
+            <div id="matchList" class="match-list"></div>
+          </section>
+
+          <div id="statusLog" class="status-log compact hidden" role="status" aria-live="polite">
+            Ready to mash.
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>
