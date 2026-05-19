@@ -5,4 +5,4 @@ compatibility_date = "2026-05-01"
 [vars]
 APPLE_STOREFRONT_ID = "us"
 APPLE_TOKEN_TTL_SECONDS = "3600"
-ALLOWED_ORIGINS = "http://localhost:4173"
+ALLOWED_ORIGINS = "http://localhost:4173,https://azhang4216.github.io"
