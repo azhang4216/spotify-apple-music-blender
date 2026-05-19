@@ -15,15 +15,17 @@ const config = {
   appleStorefrontId: env("APPLE_STOREFRONT_ID") || "us",
 };
 
+const outFile = env("CONFIG_OUT") || "config.js";
+
 writeFileSync(
-  "config.js",
+  outFile,
   `window.BLEND_CONFIG = ${JSON.stringify(config, null, 2)};\n`,
 );
 
 console.log(
   JSON.stringify(
     {
-      wrote: "config.js",
+      wrote: outFile,
       hasSpotifyClientId: Boolean(config.spotifyClientId),
       hasSpotifyRedirectUri: Boolean(config.spotifyRedirectUri),
       hasAppleDeveloperToken: Boolean(config.appleDeveloperToken),

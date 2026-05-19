@@ -29,13 +29,17 @@ jobs:
         with:
           node-version: 22
 
-      - name: Generate runtime config
+      - name: Build static artifact
         env:
           SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
           SPOTIFY_REDIRECT_URI: ${{ vars.SPOTIFY_REDIRECT_URI }}
           APPLE_TOKEN_ENDPOINT: ${{ vars.APPLE_TOKEN_ENDPOINT }}
           APPLE_STOREFRONT_ID: ${{ vars.APPLE_STOREFRONT_ID }}
-        run: npm run build:config
+        run: |
+          rm -rf dist
+          mkdir -p dist
+          cp index.html styles.css app.js dist/
+          CONFIG_OUT=dist/config.js npm run build:config
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
@@ -45,7 +49,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: "."
+          path: "dist"
 
       - name: Deploy to GitHub Pages
         id: deployment
