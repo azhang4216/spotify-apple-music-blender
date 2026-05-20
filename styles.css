@@ -1194,6 +1194,58 @@ textarea {
   font-size: 0.9rem;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(49, 32, 16, 0.22);
+}
+
+.name-card {
+  display: grid;
+  width: min(100%, 420px);
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fffdf8;
+  box-shadow: 0 24px 60px rgba(93, 59, 23, 0.24);
+}
+
+.name-card h2 {
+  font-size: 1.45rem;
+}
+
+.name-card p {
+  color: var(--muted);
+}
+
+.name-field {
+  display: grid;
+  gap: 6px;
+}
+
+.name-field span {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.name-field input {
+  min-height: 48px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 800;
+}
+
 @media (max-width: 640px) {
   .page-shell {
     width: min(100% - 20px, 1180px);

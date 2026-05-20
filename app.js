@@ -5,6 +5,7 @@ const STORAGE = {
   pendingInvite: "potatunes.pendingInvite",
   pendingInvitePayload: "potatunes.pendingInvitePayload",
   appleUserToken: "potatunes.appleUserToken",
+  appleDisplayName: "potatunes.appleDisplayName",
   appSnapshot: "potatunes.appSnapshot",
   blendHistory: "potatunes.blendHistory",
 };
@@ -56,6 +57,7 @@ const PENALTY_VERSION_WORDS = new Set(["acoustic", "instrumental", "karaoke", "l
 const RESULTS_PAGE_SIZE = 40;
 const LIBRARY_REFRESH_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
 const APPLE_PAGE_SIZE = 100;
+const APPLE_PLACEHOLDER_NAME = "Apple Music listener";
 
 const state = {
   config: { ...DEFAULT_CONFIG },
@@ -84,6 +86,7 @@ const LOADING_STEPS = [
 ];
 
 const els = {};
+let pendingNamePrompt = null;
 
 document.addEventListener("DOMContentLoaded", init);
 
@@ -135,6 +138,10 @@ function bindElements() {
     "matchList",
     "mashButton",
     "modeBanner",
+    "nameForm",
+    "nameInput",
+    "nameModal",
+    "nameSaveButton",
     "progressFill",
     "resetButton",
     "resultCopy",
@@ -209,6 +216,7 @@ function attachEvents() {
   els.blendHistoryList.addEventListener("click", openBlendHistory);
   els.resultPrevButton.addEventListener("click", () => changeResultPage(-1));
   els.resultNextButton.addEventListener("click", () => changeResultPage(1));
+  els.nameForm.addEventListener("submit", submitNamePrompt);
   window.addEventListener("hashchange", () => {
     if (state.busy) return;
     loadRouteFromLocation({ fromNavigation: true }).then(() => render());
@@ -553,17 +561,77 @@ async function connectPotatunesSpotify(accessToken) {
 async function connectPotatunesApple(musicUserToken) {
   if (!apiBase() || !musicUserToken) return null;
   try {
+    const savedDisplayName = cleanDisplay(getStoredItem(STORAGE.appleDisplayName));
     const body = await apiRequest("/api/auth/apple", {
       method: "POST",
       body: {
         musicUserToken,
-        displayName: state.session?.profile?.name || "Apple Music listener",
+        displayName: savedDisplayName || state.session?.profile?.name || APPLE_PLACEHOLDER_NAME,
       },
     });
     return savePotatunesAuth(body);
   } catch {
     return null;
   }
+}
+
+async function ensureAppleDisplayName() {
+  if (state.session?.service !== "apple") return;
+
+  const currentName = state.potatunesAuth?.user?.provider === "apple"
+    ? state.potatunesAuth.user.displayName
+    : state.session.profile?.name || "";
+  if (!isPlaceholderAppleName(currentName)) {
+    state.session.profile.name = currentName;
+    setStoredItem(STORAGE.appleDisplayName, currentName);
+    return;
+  }
+
+  const displayName = await requestNamePrompt();
+  state.session.profile.name = displayName;
+  setStoredItem(STORAGE.appleDisplayName, displayName);
+
+  if (state.potatunesAuth?.user?.provider === "apple" && state.potatunesAuth?.session?.token && apiBase()) {
+    try {
+      const body = await apiRequest("/api/me", {
+        method: "PATCH",
+        auth: true,
+        body: { displayName },
+      });
+      if (body.user) {
+        savePotatunesAuth({
+          ...state.potatunesAuth,
+          user: body.user,
+        });
+        state.session.profile.name = body.user.displayName || displayName;
+      }
+    } catch {
+      // The local nickname still works for this browser if the backend is unavailable.
+    }
+  }
+}
+
+function isPlaceholderAppleName(name) {
+  return !cleanDisplay(name) || cleanDisplay(name) === APPLE_PLACEHOLDER_NAME;
+}
+
+function requestNamePrompt() {
+  return new Promise((resolve) => {
+    pendingNamePrompt = resolve;
+    els.nameInput.value = cleanDisplay(getStoredItem(STORAGE.appleDisplayName));
+    els.nameModal.classList.remove("hidden");
+    window.setTimeout(() => els.nameInput.focus(), 0);
+  });
+}
+
+function submitNamePrompt(event) {
+  event.preventDefault();
+  const displayName = cleanDisplay(els.nameInput.value).slice(0, 40);
+  if (!displayName) return;
+  els.nameModal.classList.add("hidden");
+  const resolve = pendingNamePrompt;
+  pendingNamePrompt = null;
+  resolve?.(displayName);
 }
 
 async function fetchSpotifySavedTracks(accessToken) {
@@ -626,10 +694,12 @@ async function connectApple() {
 
     state.session = {
       service: "apple",
-      profile: { name: "Apple Music listener" },
+      profile: { name: cleanDisplay(getStoredItem(STORAGE.appleDisplayName)) || APPLE_PLACEHOLDER_NAME },
       tracks: [],
     };
-    await connectPotatunesApple(userToken || music.musicUserToken || "");
+    const auth = await connectPotatunesApple(userToken || music.musicUserToken || "");
+    if (auth?.user?.displayName) state.session.profile.name = auth.user.displayName;
+    await ensureAppleDisplayName();
     renderCollecting("Apple Music", 0, 4);
     if (await useStoredLibrarySnapshotIfFresh()) {
       await finishCollection();
@@ -2385,6 +2455,7 @@ function clearSession({ clearAuth = false } = {}) {
   if (clearAuth) {
     removeStoredItem(STORAGE.spotifyToken);
     removeStoredItem(STORAGE.appleUserToken);
+    removeStoredItem(STORAGE.appleDisplayName);
     removeStoredItem(STORAGE.potatunesAuth);
   }
   state.invite = null;

@@ -100,6 +100,11 @@ async function handleApi(request, env, url, corsHeaders) {
     return json({ user: requireSession(session).user }, 200, corsHeaders);
   }
 
+  if (resource === "me" && request.method === "PATCH" && !id) {
+    const auth = requireSession(session);
+    return json({ user: await updateUserProfile(db, auth.user.id, await readJson(request)) }, 200, corsHeaders);
+  }
+
   if (resource === "auth" && request.method === "POST" && id === "logout") {
     await revokeSession(db, requireSession(session));
     return json({ ok: true }, 200, corsHeaders);
@@ -290,14 +295,19 @@ function bearerToken(request) {
 async function upsertUser(db, body) {
   const provider = requireProvider(body.provider);
   const providerUserId = requireString(body.providerUserId || body.provider_user_id, "providerUserId");
-  const displayName = stringValue(body.displayName || body.display_name) || `${providerName(provider)} listener`;
+  const nextDisplayName = stringValue(body.displayName || body.display_name) || `${providerName(provider)} listener`;
   const avatarUrl = stringValue(body.avatarUrl || body.avatar_url);
   const profileUrl = stringValue(body.profileUrl || body.profile_url);
   const existing = await db
-    .prepare("SELECT id FROM users WHERE provider = ? AND provider_user_id = ?")
+    .prepare("SELECT id, display_name FROM users WHERE provider = ? AND provider_user_id = ?")
     .bind(provider, providerUserId)
     .first();
   const id = existing?.id || newId("usr");
+  const shouldKeepExistingName =
+    existing &&
+    isPlaceholderDisplayName(nextDisplayName, provider) &&
+    !isPlaceholderDisplayName(existing.display_name, provider);
+  const displayName = shouldKeepExistingName ? existing.display_name : nextDisplayName;
   const now = nowIso();
 
   await db
@@ -321,6 +331,21 @@ async function upsertUser(db, body) {
       .bind(provider, providerUserId)
       .first(),
   );
+}
+
+async function updateUserProfile(db, userId, body) {
+  await findRequired(db, "users", userId);
+  const displayName = requireString(body.displayName || body.display_name, "displayName").slice(0, 80);
+  const now = nowIso();
+  await db
+    .prepare("UPDATE users SET display_name = ?, updated_at = ?, last_seen_at = ? WHERE id = ?")
+    .bind(displayName, now, now, userId)
+    .run();
+  return serializeUser(await findRequired(db, "users", userId));
+}
+
+function isPlaceholderDisplayName(displayName, provider) {
+  return !stringValue(displayName) || stringValue(displayName) === `${providerName(provider)} listener`;
 }
 
 async function createLibrarySnapshot(db, body) {

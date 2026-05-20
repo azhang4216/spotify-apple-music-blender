@@ -229,6 +229,20 @@
           </div>
         </section>
       </main>
+
+      <div id="nameModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="nameModalTitle">
+        <form id="nameForm" class="name-card">
+          <h2 id="nameModalTitle">What should we call you?</h2>
+          <p>Pick your Potatunes name.</p>
+          <label class="name-field">
+            <span>Name</span>
+            <input id="nameInput" type="text" name="displayName" autocomplete="nickname" maxlength="40" required />
+          </label>
+          <button id="nameSaveButton" class="primary-button" type="submit">
+            Save name
+          </button>
+        </form>
+      </div>
     </div>
   </body>
 </html>
