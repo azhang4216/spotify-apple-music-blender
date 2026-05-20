@@ -75,6 +75,7 @@ const state = {
   invitePayload: "",
   readyToMash: false,
   mashComplete: false,
+  welcomeBack: false,
   loading: defaultLoadingState(),
 };
 
@@ -251,6 +252,7 @@ async function loadRouteFromLocation({ fromNavigation = false } = {}) {
     state.invitePayload = route.payload;
     state.shareLink = "";
     state.activeBlend = null;
+    if (state.session && await returnHomeForOwnInvite()) return;
     if (route.screen === "results" && state.session?.tracks?.length) {
       state.matches = matchTracks(state.invite.tracks, state.session.tracks);
       state.readyToMash = false;
@@ -331,6 +333,7 @@ async function connectService(service) {
   if (state.busy) return;
 
   if (service === "spotify") {
+    const returningUser = hasPriorServiceSession("spotify");
     if (!state.config.spotifyClientId) {
       setStatus("Potatunes setup is not finished yet. Check Spotify and Cloudflare setup.", "error");
       return;
@@ -340,7 +343,7 @@ async function connectService(service) {
     if (getStoredItem(STORAGE.spotifyToken)) {
       try {
         setBusy(true);
-        await finishSpotifyConnection();
+        await finishSpotifyConnection({ returning: returningUser });
         return;
       } catch {
         removeStoredItem(STORAGE.spotifyToken);
@@ -379,6 +382,7 @@ async function beginSpotifyAuth(action = "collect") {
       state: csrfState,
       redirectUri: state.config.spotifyRedirectUri,
       action,
+      returningUser: hasPriorServiceSession("spotify"),
       createdAt: Date.now(),
     }),
   );
@@ -424,14 +428,15 @@ async function handleSpotifyCallback() {
   state.potatunesAuth = loadPotatunesAuth();
 
   try {
-    setBusy(true, "Finishing Spotify sign-in...");
+    const returningUser = Boolean(oauth.returningUser);
+    setBusy(true, returningUser ? "Logging you back in..." : "Finishing Spotify sign-in...");
     const token = await exchangeSpotifyCode(code, oauth);
     saveSpotifyToken(token);
     if (oauth.action === "export-spotify") {
       restoreAppSnapshot();
       await createSpotifyPlaylist();
     } else {
-      await finishSpotifyConnection();
+      await finishSpotifyConnection({ returning: returningUser });
     }
   } catch (error) {
     setStatus(error.message || "Spotify sign-in failed.", "error");
@@ -510,13 +515,17 @@ async function getSpotifyAccessToken() {
   return nextToken.accessToken;
 }
 
-async function finishSpotifyConnection() {
+async function finishSpotifyConnection({ returning = false } = {}) {
+  state.welcomeBack = returning;
   state.session = {
     service: "spotify",
     profile: { name: "Spotify listener" },
     tracks: [],
   };
-  renderCollecting("Spotify", 0, 4);
+  renderCollecting("Spotify", 0, 4, {
+    title: returning ? "Logging you back in..." : "Finding your songs",
+    copy: returning ? "Checking your saved potato sack." : undefined,
+  });
 
   const accessToken = await getSpotifyAccessToken();
   state.session.profile = await fetchSpotifyProfile(accessToken);
@@ -677,8 +686,9 @@ function bestSpotifyImage(images = []) {
 }
 
 async function connectApple() {
+  const returningUser = hasPriorServiceSession("apple");
   try {
-    setBusy(true, "Opening Apple Music...");
+    setBusy(true, returningUser ? "Logging you back in..." : "Opening Apple Music...");
     await configureMusicKit();
     const music = window.MusicKit.getInstance();
     const storedToken = getStoredItem(STORAGE.appleUserToken);
@@ -697,10 +707,14 @@ async function connectApple() {
       profile: { name: cleanDisplay(getStoredItem(STORAGE.appleDisplayName)) || APPLE_PLACEHOLDER_NAME },
       tracks: [],
     };
+    state.welcomeBack = returningUser;
     const auth = await connectPotatunesApple(userToken || music.musicUserToken || "");
     if (auth?.user?.displayName) state.session.profile.name = auth.user.displayName;
     await ensureAppleDisplayName();
-    renderCollecting("Apple Music", 0, 4);
+    renderCollecting("Apple Music", 0, 4, {
+      title: returningUser ? "Logging you back in..." : "Finding your songs",
+      copy: returningUser ? "Checking your saved potato sack." : undefined,
+    });
     if (await useStoredLibrarySnapshotIfFresh()) {
       await finishCollection();
       return;
@@ -938,6 +952,8 @@ async function finishCollection() {
   });
   await waitForPaint();
 
+  if (await returnHomeForOwnInvite()) return;
+
   if (state.invite) {
     if (!state.invite.tracks?.length && state.invite.slug) {
       setLoadingProgress("spuddySongs", 48, {
@@ -989,6 +1005,10 @@ async function finishCollection() {
 
 async function mashInvite() {
   if (state.busy || !state.invite || !state.session?.tracks?.length) return;
+  if (await returnHomeForOwnInvite()) {
+    render();
+    return;
+  }
 
   try {
     state.readyToMash = false;
@@ -1046,7 +1066,7 @@ async function mashInvite() {
     saveCurrentBlendHistory();
     await refreshBlendHistory();
     markLoadingStepDone("generate", {
-      copy: "Blend ready.",
+      copy: "Mash ready.",
       counter: String(state.matches.length),
       showArtwork: false,
     });
@@ -1067,6 +1087,7 @@ function createInviteFromSession() {
     blendId: crypto.randomUUID?.() || randomString(24),
     createdAt: new Date().toISOString(),
     host: {
+      userId: state.potatunesAuth?.user?.id || "",
       name: state.session.profile?.name || `${SERVICES[state.session.service].name} listener`,
       service: state.session.service,
       avatarUrl: state.session.profile?.avatarUrl || "",
@@ -1282,6 +1303,7 @@ function normalizeApiInvite(invite, { includeTracks = false } = {}) {
     short: true,
     createdAt: invite.createdAt,
     host: {
+      userId: invite.owner?.id || invite.ownerUserId || "",
       name: invite.owner?.displayName || "A spuddy",
       service: hostService,
       avatarUrl: invite.owner?.avatarUrl || "",
@@ -1309,6 +1331,32 @@ function routeLink(route) {
   url.search = "";
   url.hash = route;
   return url.toString();
+}
+
+function isOwnInvite(invite = state.invite) {
+  const inviteOwnerId = invite?.host?.userId || invite?.ownerUserId || "";
+  const currentUserId = state.potatunesAuth?.user?.id || "";
+  return Boolean(inviteOwnerId && currentUserId && inviteOwnerId === currentUserId);
+}
+
+async function returnHomeForOwnInvite() {
+  if (!state.session || !isOwnInvite()) return false;
+
+  state.invite = null;
+  state.invitePayload = "";
+  state.matches = [];
+  state.shareLink = "";
+  state.activeBlend = null;
+  state.resultPage = 1;
+  state.readyToMash = false;
+  state.mashComplete = false;
+  state.loading = defaultLoadingState();
+  sessionStorage.removeItem(STORAGE.pendingInvite);
+  sessionStorage.removeItem(STORAGE.pendingInvitePayload);
+  els.statusLog.classList.add("hidden");
+  await refreshBlendHistory();
+  setRoute("/account");
+  return true;
 }
 
 async function encodeInvitePayload(invite) {
@@ -2146,7 +2194,7 @@ async function importBlendPack(event) {
       });
       markLoadingStepDone("generate", {
         title: "Generating",
-        copy: "Blend ready.",
+        copy: "Mash ready.",
         counter: String(state.matches.length),
         showArtwork: false,
       });
@@ -2470,6 +2518,7 @@ function clearSession({ clearAuth = false } = {}) {
   state.invitePayload = "";
   state.readyToMash = false;
   state.mashComplete = false;
+  state.welcomeBack = false;
   state.loading = defaultLoadingState();
   setRoute("/");
 }
@@ -2650,10 +2699,12 @@ function renderBackButton() {
 function renderAccountPanel() {
   const name = state.session?.profile?.name || "Potatunes listener";
   const service = serviceName(state.session?.service);
-  els.accountSummary.textContent = `${name} (${service})`;
+  els.accountSummary.textContent = state.welcomeBack
+    ? `Welcome back! ${name} (${service})`
+    : `${name} (${service})`;
 
   if (!state.blendHistory.length) {
-    els.blendHistoryList.innerHTML = `<p class="empty-copy">No spuddy blends yet.</p>`;
+    els.blendHistoryList.innerHTML = `<p class="empty-copy">No mashes yet.</p>`;
     return;
   }
 
@@ -2830,12 +2881,12 @@ function renderButtons() {
   els.resultNextButton.disabled = disabled || state.resultPage >= totalPages;
 }
 
-function renderCollecting(serviceNameText, count, total) {
+function renderCollecting(serviceNameText, count, total, options = {}) {
   state.loading = {
     ...defaultLoadingState(),
     active: true,
-    title: "Finding your songs",
-    copy: `${serviceNameText} is digging through your saved tunes.`,
+    title: options.title || "Finding your songs",
+    copy: options.copy || `${serviceNameText} is digging through your saved tunes.`,
     counter: String(count),
     steps: [],
     showArtwork: false,
@@ -3043,6 +3094,14 @@ function loadPotatunesAuth() {
     return null;
   }
   return auth;
+}
+
+function hasPriorServiceSession(service) {
+  const auth = loadPotatunesAuth();
+  if (auth?.user?.provider === service) return true;
+  if (service === "spotify") return Boolean(getStoredItem(STORAGE.spotifyToken));
+  if (service === "apple") return Boolean(getStoredItem(STORAGE.appleUserToken));
+  return false;
 }
 
 function savePotatunesAuth(auth) {

@@ -571,6 +571,11 @@ async function createBlend(db, body) {
 
   const matches = Array.isArray(body.matches) ? body.matches : [];
   const existingBlend = await findLatestBlendForPair(db, invite.owner_user_id, guestUserId);
+  if (invite.owner_user_id === guestUserId) {
+    throw new ApiError(409, "That is your own invite link.", {
+      code: "self_invite",
+    });
+  }
   const refreshedFromBlendId = assertBlendRefreshAllowed(existingBlend, Boolean(body.refresh));
   const blendId = newId("blend");
   const now = nowIso();
