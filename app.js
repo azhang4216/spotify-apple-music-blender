@@ -227,6 +227,11 @@ function attachEvents() {
 async function loadRouteFromLocation({ fromNavigation = false } = {}) {
   const route = parseCurrentRoute();
 
+  if (route.screen === "spuddies" && !route.payload) {
+    goHome();
+    return;
+  }
+
   if (fromNavigation && route.screen === "home") {
     clearSession();
     return;
@@ -239,9 +244,12 @@ async function loadRouteFromLocation({ fromNavigation = false } = {}) {
 
   if (!route.payload) {
     const pending = sessionStorage.getItem(STORAGE.pendingInvite);
-    if (pending) {
+    const pendingPayload = sessionStorage.getItem(STORAGE.pendingInvitePayload) || "";
+    if (pending && pendingPayload) {
       state.invite = safeJsonParse(pending);
-      state.invitePayload = sessionStorage.getItem(STORAGE.pendingInvitePayload) || "";
+      state.invitePayload = pendingPayload;
+    } else if (pending && !pendingPayload) {
+      sessionStorage.removeItem(STORAGE.pendingInvite);
     }
     return;
   }
@@ -282,6 +290,7 @@ function parseCurrentRoute() {
   const route = rawHash.startsWith("/") ? rawHash : `/${rawHash}`;
   const parts = route.split("/").filter(Boolean);
   if (parts[0] === "mash" && parts[1]) return { screen: "mash", mashId: parts[1], payload: "" };
+  if (parts[0] === "spuddies" && !parts[1]) return { screen: "spuddies", payload: "" };
   if (parts[0] === "spuddies" && parts[1]) {
     return {
       screen: parts[2] || "join",
@@ -305,7 +314,7 @@ function routeForState() {
   if (state.busy && state.loading.active) {
     return inviteRoute && state.session ? `${inviteRoute}/mashing` : "/loading";
   }
-  if (state.invite && !state.session) return inviteRoute || "/spuddies";
+  if (state.invite && !state.session) return inviteRoute || "/";
   if (state.readyToMash && state.invite && state.session) return inviteRoute ? `${inviteRoute}/verified` : "/verified";
   if (state.mashComplete && state.invite && state.session && !state.shareLink) {
     return inviteRoute ? `${inviteRoute}/results` : "/results";
