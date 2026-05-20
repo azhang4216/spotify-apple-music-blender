@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Potatunes share preview</title>
+  <desc id="desc">Two derpy potatoes with a music note between them.</desc>
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="38%" r="76%">
+      <stop offset="0%" stop-color="#fff8e8"/>
+      <stop offset="54%" stop-color="#ffefbf"/>
+      <stop offset="100%" stop-color="#f4d79d"/>
+    </radialGradient>
+    <linearGradient id="music" x1="510" x2="690" y1="315" y2="315" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1ed760"/>
+      <stop offset="50%" stop-color="#f3c85f"/>
+      <stop offset="100%" stop-color="#fa5d84"/>
+    </linearGradient>
+    <filter id="softShadow" x="-25%" y="-30%" width="150%" height="170%">
+      <feDropShadow dx="0" dy="24" stdDeviation="18" flood-color="#7f4f18" flood-opacity=".25"/>
+    </filter>
+    <filter id="musicShadow" x="-35%" y="-35%" width="170%" height="170%">
+      <feDropShadow dx="0" dy="16" stdDeviation="12" flood-color="#6a451c" flood-opacity=".2"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <g fill="#d9aa5d" opacity=".22">
+    <circle cx="72" cy="82" r="8"/>
+    <circle cx="202" cy="534" r="7"/>
+    <circle cx="331" cy="98" r="5"/>
+    <circle cx="469" cy="552" r="6"/>
+    <circle cx="738" cy="92" r="6"/>
+    <circle cx="916" cy="545" r="8"/>
+    <circle cx="1088" cy="104" r="7"/>
+    <circle cx="1130" cy="421" r="5"/>
+  </g>
+
+  <g filter="url(#softShadow)">
+    <g transform="translate(106 138) rotate(-7)">
+      <path d="M92 24c72-49 190 7 214 101 25 97-64 164-152 154-89-10-145-80-113-163 12-43 26-75 51-92z" fill="#dfb466" stroke="#bd843d" stroke-width="8"/>
+      <circle cx="140" cy="135" r="14" fill="#573716"/>
+      <circle cx="212" cy="137" r="14" fill="#573716"/>
+      <path d="M149 192c30 25 68 25 98-1" fill="none" stroke="#6c441f" stroke-width="11" stroke-linecap="round"/>
+      <circle cx="95" cy="91" r="11" fill="#ad7937" opacity=".45"/>
+      <circle cx="251" cy="204" r="10" fill="#ad7937" opacity=".35"/>
+      <circle cx="176" cy="68" r="7" fill="#ad7937" opacity=".4"/>
+    </g>
+
+    <g transform="translate(792 126) rotate(8)">
+      <path d="M83 22c74-49 193 8 217 102 25 97-66 163-154 154C57 268 2 199 34 116 46 72 59 38 83 22z" fill="#f2c75f" stroke="#c89443" stroke-width="8"/>
+      <circle cx="134" cy="134" r="14" fill="#573716"/>
+      <circle cx="205" cy="135" r="14" fill="#573716"/>
+      <path d="M144 191c30 25 67 25 98-1" fill="none" stroke="#6c441f" stroke-width="11" stroke-linecap="round"/>
+      <circle cx="89" cy="85" r="11" fill="#d4a047" opacity=".48"/>
+      <circle cx="245" cy="205" r="10" fill="#d4a047" opacity=".38"/>
+      <circle cx="169" cy="62" r="7" fill="#d4a047" opacity=".45"/>
+    </g>
+  </g>
+
+  <g filter="url(#musicShadow)">
+    <circle cx="600" cy="315" r="118" fill="#fff9eb" stroke="#d69f48" stroke-width="7"/>
+    <circle cx="600" cy="315" r="90" fill="url(#music)"/>
+    <path d="M624 260v96c0 24-22 42-51 42-26 0-45-15-45-34 0-21 23-37 51-33 7 1 14 3 20 5v-71l66-16v34l-41 9z" fill="#261707"/>
+  </g>
+</svg>
