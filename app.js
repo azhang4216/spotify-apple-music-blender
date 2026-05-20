@@ -534,6 +534,9 @@ async function finishSpotifyConnection({ returning = false } = {}) {
   renderCollecting("Spotify", 0, 4, {
     title: returning ? "Logging you back in..." : "Finding your songs",
     copy: returning ? "Checking your saved potato sack." : undefined,
+    counter: returning ? "..." : undefined,
+    progress: returning ? 14 : undefined,
+    updateProgress: !returning,
   });
 
   const accessToken = await getSpotifyAccessToken();
@@ -723,6 +726,9 @@ async function connectApple() {
     renderCollecting("Apple Music", 0, 4, {
       title: returningUser ? "Logging you back in..." : "Finding your songs",
       copy: returningUser ? "Checking your saved potato sack." : undefined,
+      counter: returningUser ? "..." : undefined,
+      progress: returningUser ? 14 : undefined,
+      updateProgress: !returningUser,
     });
     if (await useStoredLibrarySnapshotIfFresh()) {
       await finishCollection();
@@ -2896,10 +2902,19 @@ function renderCollecting(serviceNameText, count, total, options = {}) {
     active: true,
     title: options.title || "Finding your songs",
     copy: options.copy || `${serviceNameText} is digging through your saved tunes.`,
-    counter: String(count),
+    counter: options.counter ?? String(count),
     steps: [],
     showArtwork: false,
   };
+  if (options.updateProgress === false) {
+    setLoadingProgress("yourSongs", options.progress ?? 12, {
+      copy: state.loading.copy,
+      counter: state.loading.counter,
+      render: false,
+    });
+    render();
+    return;
+  }
   updateLibraryProgress(count, total);
   render();
 }
