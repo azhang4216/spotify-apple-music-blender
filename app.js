@@ -55,6 +55,7 @@ const VERSION_WORDS = new Set([
 const PENALTY_VERSION_WORDS = new Set(["acoustic", "instrumental", "karaoke", "live", "remix"]);
 const RESULTS_PAGE_SIZE = 40;
 const LIBRARY_REFRESH_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
+const APPLE_PAGE_SIZE = 100;
 
 const state = {
   config: { ...DEFAULT_CONFIG },
@@ -666,8 +667,18 @@ async function configureMusicKit() {
 }
 
 async function fetchAppleLibrarySongs(music) {
+  const musicKitTracks = await fetchAppleLibrarySongsWithMusicKit(music).catch(() => []);
+  if (musicKitTracks.length) return musicKitTracks;
+
+  const apiTracks = await fetchAppleLibrarySongsWithApi().catch(() => []);
+  if (apiTracks.length) return apiTracks;
+
+  return await fetchAppleFavoritePlaylistTracks().catch(() => []);
+}
+
+async function fetchAppleLibrarySongsWithMusicKit(music) {
   const tracks = [];
-  const limit = 100;
+  const limit = APPLE_PAGE_SIZE;
   let offset = 0;
   let hasMore = true;
 
@@ -675,20 +686,7 @@ async function fetchAppleLibrarySongs(music) {
     const response = await music.api.library.songs({ limit, offset });
     const data = response?.data || [];
     for (const song of data) {
-      tracks.push(toTrack({
-        service: "apple",
-        id: song.id,
-        uri: song.id,
-        title: song.attributes?.name,
-        artists: splitAppleArtists(song.attributes?.artistName),
-        album: song.attributes?.albumName || "",
-        durationMs: song.attributes?.durationInMillis || 0,
-        isrc: song.attributes?.isrc || "",
-        artworkUrl: appleArtworkUrl(song.attributes?.artwork?.url),
-        url: song.attributes?.url || "",
-        appleType: song.type || "library-songs",
-        catalogId: song.attributes?.playParams?.catalogId || "",
-      }));
+      tracks.push(appleSongResourceToTrack(song));
     }
 
     if (state.session?.service === "apple") state.session.tracks = tracks;
@@ -698,6 +696,99 @@ async function fetchAppleLibrarySongs(music) {
   }
 
   return tracks;
+}
+
+async function fetchAppleLibrarySongsWithApi() {
+  return await fetchAppleTrackPageSet("/v1/me/library/songs");
+}
+
+async function fetchAppleFavoritePlaylistTracks() {
+  const playlists = await fetchAppleLibraryPlaylists();
+  const favoritePlaylist = playlists.find(isFavoriteSongsPlaylist);
+  if (!favoritePlaylist) return [];
+
+  const tracks = await fetchAppleTrackPageSet(`/v1/me/library/playlists/${encodeURIComponent(favoritePlaylist.id)}/tracks`);
+  if (tracks.length) {
+    setStatus("Apple Music returned your Favorite Songs playlist. Using that sack.", "info");
+  }
+  return tracks;
+}
+
+async function fetchAppleLibraryPlaylists() {
+  const playlists = [];
+  await fetchApplePaged("/v1/me/library/playlists", (playlist) => playlists.push(playlist));
+  return playlists;
+}
+
+async function fetchAppleTrackPageSet(path) {
+  const tracks = [];
+  await fetchApplePaged(path, (song) => {
+    tracks.push(appleSongResourceToTrack(song));
+    if (state.session?.service === "apple") state.session.tracks = tracks;
+    updateLibraryProgress(tracks.length, tracks.length + APPLE_PAGE_SIZE);
+  });
+  updateLibraryProgress(tracks.length, tracks.length);
+  return tracks;
+}
+
+async function fetchApplePaged(path, onItem) {
+  let next = path;
+  let params = { limit: String(APPLE_PAGE_SIZE), offset: "0" };
+
+  while (next) {
+    const body = await fetchAppleApi(next, params);
+    for (const item of body.data || []) onItem(item);
+    next = body.next || "";
+    params = {};
+  }
+}
+
+async function fetchAppleApi(path, params = {}) {
+  const musicUserToken = getStoredItem(STORAGE.appleUserToken);
+  if (!musicUserToken) throw new Error("Apple Music is not connected.");
+
+  const developerToken = await getAppleDeveloperToken();
+  const url = new URL(path, "https://api.music.apple.com");
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== "") {
+      url.searchParams.set(key, value);
+    }
+  }
+
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${developerToken}`,
+      "Music-User-Token": musicUserToken,
+    },
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.errors?.[0]?.detail || body.errors?.[0]?.title || "Apple Music request failed.");
+  }
+  return body;
+}
+
+function appleSongResourceToTrack(song) {
+  const attributes = song.attributes || {};
+  return toTrack({
+    service: "apple",
+    id: song.id,
+    uri: song.id,
+    title: attributes.name,
+    artists: splitAppleArtists(attributes.artistName),
+    album: attributes.albumName || "",
+    durationMs: attributes.durationInMillis || 0,
+    isrc: attributes.isrc || "",
+    artworkUrl: appleArtworkUrl(attributes.artwork?.url),
+    url: attributes.url || "",
+    appleType: song.type || "library-songs",
+    catalogId: attributes.playParams?.catalogId || (song.type === "songs" ? song.id : ""),
+  });
+}
+
+function isFavoriteSongsPlaylist(playlist) {
+  const name = basicNormalize(playlist.attributes?.name || "");
+  return name === "favorite songs" || name === "favourite songs";
 }
 
 function splitAppleArtists(artistName = "") {
@@ -754,14 +845,20 @@ async function preferAppleLikedTracks(tracks, music) {
 
 async function finishCollection() {
   if (!state.session?.tracks?.length) {
+    const isApple = state.session?.service === "apple";
     state.readyToMash = false;
     state.mashComplete = false;
     markLoadingStepDone("yourSongs", {
       title: "No songs found",
-      copy: "Nothing turned up in this sack.",
+      copy: isApple ? "Apple returned no library or Favorite Songs tracks." : "Nothing turned up in this sack.",
       counter: "0",
     });
-    setStatus("No tunes were found for this account.", "error");
+    setStatus(
+      isApple
+        ? "Apple Music returned no library or Favorite Songs tracks for this account."
+        : "No tunes were found for this account.",
+      "error",
+    );
     return;
   }
 
