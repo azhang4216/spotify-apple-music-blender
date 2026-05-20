@@ -39,7 +39,7 @@ jobs:
         run: |
           rm -rf dist
           mkdir -p dist
-          cp index.html styles.css app.js dist/
+          cp index.html styles.css app.js preview.png dist/
           CONFIG_OUT=dist/config.js npm run build:config
 
       - name: Configure Pages
