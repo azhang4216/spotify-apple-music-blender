@@ -54,6 +54,8 @@ const VERSION_WORDS = new Set([
 ]);
 
 const PENALTY_VERSION_WORDS = new Set(["acoustic", "instrumental", "karaoke", "live", "remix"]);
+const TITLE_STOP_WORDS = new Set(["a", "an", "and", "at", "by", "for", "from", "in", "me", "my", "of", "on", "or", "the", "to", "with", "you", "your"]);
+const SPOTIFY_PLAYLIST_SCOPES = ["playlist-modify-private", "playlist-modify-public"];
 const RESULTS_PAGE_SIZE = 40;
 const LIBRARY_REFRESH_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
 const APPLE_PAGE_SIZE = 100;
@@ -632,6 +634,22 @@ async function ensureAppleDisplayName() {
   }
 }
 
+async function ensureAppleLocalDisplayName() {
+  if (state.session?.service !== "apple") return "";
+
+  const currentName = cleanDisplay(getStoredItem(STORAGE.appleDisplayName)) || state.session.profile?.name || "";
+  if (!isPlaceholderAppleName(currentName)) {
+    state.session.profile.name = currentName;
+    setStoredItem(STORAGE.appleDisplayName, currentName);
+    return currentName;
+  }
+
+  const displayName = await requestNamePrompt();
+  state.session.profile.name = displayName;
+  setStoredItem(STORAGE.appleDisplayName, displayName);
+  return displayName;
+}
+
 function isPlaceholderAppleName(name) {
   return !cleanDisplay(name) || cleanDisplay(name) === APPLE_PLACEHOLDER_NAME;
 }
@@ -720,6 +738,7 @@ async function connectApple() {
       tracks: [],
     };
     state.welcomeBack = returningUser;
+    await ensureAppleLocalDisplayName();
     const auth = await connectPotatunesApple(userToken || music.musicUserToken || "");
     if (auth?.user?.displayName) state.session.profile.name = auth.user.displayName;
     await ensureAppleDisplayName();
@@ -1573,6 +1592,8 @@ function buildCandidateIndex(tracks) {
   const byStrict = new Map();
   const byTitle = new Map();
   const byFirstToken = new Map();
+  const byTitleToken = new Map();
+  const byArtist = new Map();
 
   tracks.forEach((track, index) => {
     track._matchId = `${track.norm.strictKey}:${track.isrc}:${index}`;
@@ -1580,9 +1601,13 @@ function buildCandidateIndex(tracks) {
     addToMap(byStrict, track.norm.strictKey, track);
     addToMap(byTitle, track.norm.titleKey, track);
     addToMap(byFirstToken, track.norm.titleTokens[0] || "", track);
+    addToMap(byArtist, track.norm.primaryArtist, track);
+    for (const token of significantTitleTokens(track.norm.titleTokens)) {
+      addToMap(byTitleToken, token, track);
+    }
   });
 
-  return { byIsrc, byStrict, byTitle, byFirstToken };
+  return { byIsrc, byStrict, byTitle, byFirstToken, byTitleToken, byArtist };
 }
 
 function findBestMatch(guest, index, usedHost) {
@@ -1597,6 +1622,8 @@ function findBestMatch(guest, index, usedHost) {
   const pool = uniqueTracks([
     ...(index.byTitle.get(guest.norm.titleKey) || []),
     ...(index.byFirstToken.get(guest.norm.titleTokens[0] || "") || []),
+    ...(index.byArtist.get(guest.norm.primaryArtist) || []),
+    ...significantTitleTokens(guest.norm.titleTokens).flatMap((token) => index.byTitleToken.get(token) || []),
   ]).filter((track) => !usedHost.has(track._matchId));
 
   let best = null;
@@ -1616,6 +1643,7 @@ function scoreTracks(a, b) {
   const titleScore = Math.max(
     diceCoefficient(a.norm.title, b.norm.title),
     jaccard(a.norm.titleTokens, b.norm.titleTokens),
+    tokenContainment(a.norm.titleTokens, b.norm.titleTokens),
   );
   const artistScore = Math.max(
     jaccard(a.norm.artistTokens, b.norm.artistTokens),
@@ -1629,6 +1657,21 @@ function scoreTracks(a, b) {
     value,
     reason: titleScore > 0.95 ? "Nearly identical title" : "Fuzzy title + artist",
   };
+}
+
+function significantTitleTokens(tokens = []) {
+  return tokens.filter((token) => token.length > 1 && !TITLE_STOP_WORDS.has(token));
+}
+
+function tokenContainment(a = [], b = []) {
+  const left = new Set(significantTitleTokens(a));
+  const right = new Set(significantTitleTokens(b));
+  if (!left.size || !right.size) return 0;
+  let intersection = 0;
+  for (const item of left) {
+    if (right.has(item)) intersection += 1;
+  }
+  return intersection / Math.min(left.size, right.size);
 }
 
 function durationSimilarity(a, b) {
@@ -1711,18 +1754,25 @@ function uniqueTracks(tracks) {
   });
 }
 
-async function ensureAppleAuthorized() {
+async function ensureAppleAuthorized({ force = false } = {}) {
   await configureMusicKit();
   const music = window.MusicKit.getInstance();
   const storedToken = getStoredItem(STORAGE.appleUserToken);
-  if (storedToken && !music.musicUserToken) {
+  if (force) {
+    removeStoredItem(STORAGE.appleUserToken);
+    try {
+      music.musicUserToken = "";
+    } catch {
+      // MusicKit owns this value in some browsers.
+    }
+  } else if (storedToken && !music.musicUserToken) {
     try {
       music.musicUserToken = storedToken;
     } catch {
       // MusicKit owns this value in some browsers.
     }
   }
-  const existingToken = music.musicUserToken || storedToken;
+  const existingToken = force ? "" : music.musicUserToken || storedToken;
   if (existingToken) {
     setStoredItem(STORAGE.appleUserToken, existingToken);
     return music;
@@ -1935,7 +1985,8 @@ async function createPlaylist(targetService) {
       if (!state.config.spotifyClientId) {
         throw new Error("Potatunes setup is not finished yet. Check Spotify and Cloudflare setup.");
       }
-      if (!getStoredItem(STORAGE.spotifyToken)) {
+      if (!getStoredItem(STORAGE.spotifyToken) || !spotifyTokenHasPlaylistScopes()) {
+        removeStoredItem(STORAGE.spotifyToken);
         saveAppSnapshot();
         await beginSpotifyAuth("export-spotify");
         return;
@@ -2002,6 +2053,12 @@ async function createSpotifyPlaylist() {
     }),
   });
   const playlist = await created.json().catch(() => ({}));
+  if (created.status === 401 || created.status === 403) {
+    removeStoredItem(STORAGE.spotifyToken);
+    saveAppSnapshot();
+    await beginSpotifyAuth("export-spotify");
+    return;
+  }
   if (!created.ok) throw new Error(playlist.error?.message || "Spotify playlist creation failed.");
 
   const chunks = chunkArray(uris, 100);
@@ -2015,6 +2072,10 @@ async function createSpotifyPlaylist() {
       body: JSON.stringify({ uris: chunk }),
     });
     const body = await response.json().catch(() => ({}));
+    if (response.status === 401 || response.status === 403) {
+      removeStoredItem(STORAGE.spotifyToken);
+      throw new Error("Spotify needs playlist permission. Reconnect Spotify and try again.");
+    }
     if (!response.ok) throw new Error(body.error?.message || "Spotify could not add tracks.");
     setLoadingProgress("generate", 82 + ((index + 1) / chunks.length) * 14, {
       copy: "Planting the playlist.",
@@ -2032,7 +2093,7 @@ async function createSpotifyPlaylist() {
   setStatus(`Planted ${uris.length} tune${uris.length === 1 ? "" : "s"} in Spotify.${skipped}`, "info");
 }
 
-async function createApplePlaylist() {
+async function createApplePlaylist({ retryAuth = true } = {}) {
   if (!state.loading.active) startPlaylistLoading("apple");
   setLoadingProgress("generate", 24, {
     copy: "Checking Apple Music tracks.",
@@ -2069,6 +2130,15 @@ async function createApplePlaylist() {
     }),
   });
   const playlist = await created.json().catch(() => ({}));
+  if ((created.status === 401 || created.status === 403) && retryAuth) {
+    removeStoredItem(STORAGE.appleUserToken);
+    await ensureAppleAuthorized({ force: true });
+    return createApplePlaylist({ retryAuth: false });
+  }
+  if (created.status === 401 || created.status === 403) {
+    removeStoredItem(STORAGE.appleUserToken);
+    throw new Error("Apple Music needs permission to edit your library. Reconnect Apple Music and try again.");
+  }
   if (!created.ok) throw new Error(playlist.errors?.[0]?.detail || "Apple Music playlist creation failed.");
 
   const playlistId = playlist.data?.[0]?.id;
@@ -2083,6 +2153,10 @@ async function createApplePlaylist() {
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
+      if (response.status === 401 || response.status === 403) {
+        removeStoredItem(STORAGE.appleUserToken);
+        throw new Error("Apple Music needs permission to edit your library. Reconnect Apple Music and try again.");
+      }
       throw new Error(body.errors?.[0]?.detail || "Apple Music could not add tracks.");
     }
     setLoadingProgress("generate", 82 + ((index + 1) / chunks.length) * 14, {
@@ -2383,20 +2457,49 @@ function matchFromApiBlendTrack(track, blend) {
     artists: Array.isArray(track.artists) && track.artists.length ? track.artists : ["Unknown artist"],
     isrc: track.isrc || "",
   };
+  const spotifyTrack = apiProviderTrackToTrack(track.spotifyTrack);
+  const appleTrack = apiProviderTrackToTrack(track.appleTrack);
+  const fallbackHostTrack = toTrack({
+    ...displayTrack,
+    service: blend.host?.provider || "unknown",
+    id: "",
+  });
+  const fallbackGuestTrack = toTrack({
+    ...displayTrack,
+    service: blend.guest?.provider || "unknown",
+    id: "",
+  });
   return {
     score: Number(track.score || 0),
     reason: track.reason || "",
-    hostTrack: toTrack({
-      ...displayTrack,
-      service: blend.host?.provider || "unknown",
-      id: "",
-    }),
-    yourTrack: toTrack({
-      ...displayTrack,
-      service: blend.guest?.provider || "unknown",
-      id: "",
-    }),
+    hostTrack: providerTrackForService(blend.host?.provider, { spotifyTrack, appleTrack }) || fallbackHostTrack,
+    yourTrack: providerTrackForService(blend.guest?.provider, { spotifyTrack, appleTrack }) || fallbackGuestTrack,
   };
+}
+
+function providerTrackForService(service, tracks) {
+  if (service === "spotify") return tracks.spotifyTrack;
+  if (service === "apple") return tracks.appleTrack;
+  return null;
+}
+
+function apiProviderTrackToTrack(track) {
+  if (!track?.provider) return null;
+  return toTrack({
+    service: track.provider,
+    id: track.providerTrackId || "",
+    uri: track.uri || "",
+    providerTrackDbId: track.id || "",
+    title: track.title,
+    artists: track.artists,
+    album: track.album,
+    durationMs: track.durationMs,
+    isrc: track.isrc,
+    artworkUrl: track.artworkUrl,
+    url: track.url,
+    appleType: track.appleType,
+    catalogId: track.catalogId,
+  });
 }
 
 function compactHistoryTrack(track) {
@@ -2787,7 +2890,7 @@ function renderResults() {
       : "No shared spuds yet";
   els.resultCopy.textContent = matchCount
     ? activeBlend
-      ? "All the songs you both mashed."
+      ? "All the songs you've both liked!"
       : "Plant the playlist where you want it."
     : "No musical potatoes overlapped this time.";
 
@@ -2825,7 +2928,7 @@ function statHtml(value, label) {
 }
 
 function matchRowHtml(match) {
-  const track = match.yourTrack;
+  const track = displayTrackForMatch(match);
   const art = track.artworkUrl
     ? `<img src="${escapeAttribute(track.artworkUrl)}" alt="" loading="lazy" />`
     : "";
@@ -2838,6 +2941,13 @@ function matchRowHtml(match) {
       </div>
     </article>
   `;
+}
+
+function displayTrackForMatch(match) {
+  return [match.yourTrack, match.hostTrack].find((track) => track?.service === "spotify") ||
+    match.yourTrack ||
+    match.hostTrack ||
+    toTrack({ service: "unknown", title: "Untitled", artists: ["Unknown artist"] });
 }
 
 function changeResultPage(delta) {
@@ -3126,6 +3236,13 @@ function hasPriorServiceSession(service) {
   if (service === "spotify") return Boolean(getStoredItem(STORAGE.spotifyToken));
   if (service === "apple") return Boolean(getStoredItem(STORAGE.appleUserToken));
   return false;
+}
+
+function spotifyTokenHasPlaylistScopes() {
+  const token = safeJsonParse(getStoredItem(STORAGE.spotifyToken));
+  if (!token?.accessToken) return false;
+  const scopes = new Set(String(token.scope || "").split(/\s+/).filter(Boolean));
+  return SPOTIFY_PLAYLIST_SCOPES.every((scope) => scopes.has(scope));
 }
 
 function savePotatunesAuth(auth) {

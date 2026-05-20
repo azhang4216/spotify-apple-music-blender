@@ -734,7 +734,41 @@ async function getBlend(db, blendId) {
   if (!blend) throw new ApiError(404, "Blend not found.");
 
   const tracks = await db
-    .prepare("SELECT * FROM blend_tracks WHERE blend_id = ? ORDER BY position ASC")
+    .prepare(`
+      SELECT
+        bt.*,
+        sp.id AS spotify_pt_id,
+        sp.provider AS spotify_pt_provider,
+        sp.provider_track_id AS spotify_pt_provider_track_id,
+        sp.provider_uri AS spotify_pt_provider_uri,
+        sp.catalog_id AS spotify_pt_catalog_id,
+        sp.apple_type AS spotify_pt_apple_type,
+        sp.title AS spotify_pt_title,
+        sp.artists_json AS spotify_pt_artists_json,
+        sp.album AS spotify_pt_album,
+        sp.isrc AS spotify_pt_isrc,
+        sp.duration_ms AS spotify_pt_duration_ms,
+        sp.artwork_url AS spotify_pt_artwork_url,
+        sp.external_url AS spotify_pt_external_url,
+        ap.id AS apple_pt_id,
+        ap.provider AS apple_pt_provider,
+        ap.provider_track_id AS apple_pt_provider_track_id,
+        ap.provider_uri AS apple_pt_provider_uri,
+        ap.catalog_id AS apple_pt_catalog_id,
+        ap.apple_type AS apple_pt_apple_type,
+        ap.title AS apple_pt_title,
+        ap.artists_json AS apple_pt_artists_json,
+        ap.album AS apple_pt_album,
+        ap.isrc AS apple_pt_isrc,
+        ap.duration_ms AS apple_pt_duration_ms,
+        ap.artwork_url AS apple_pt_artwork_url,
+        ap.external_url AS apple_pt_external_url
+      FROM blend_tracks bt
+      LEFT JOIN provider_tracks sp ON sp.id = bt.spotify_provider_track_id
+      LEFT JOIN provider_tracks ap ON ap.id = bt.apple_provider_track_id
+      WHERE bt.blend_id = ?
+      ORDER BY bt.position ASC
+    `)
     .bind(blendId)
     .all();
   const exports = await db
@@ -1071,6 +1105,27 @@ function serializeBlendTrack(row) {
     score: row.score,
     reason: row.reason || "",
     position: row.position,
+    spotifyTrack: serializeJoinedProviderTrack(row, "spotify"),
+    appleTrack: serializeJoinedProviderTrack(row, "apple"),
+  };
+}
+
+function serializeJoinedProviderTrack(row, prefix) {
+  if (!row[`${prefix}_pt_id`]) return null;
+  return {
+    id: row[`${prefix}_pt_id`],
+    provider: row[`${prefix}_pt_provider`],
+    providerTrackId: row[`${prefix}_pt_provider_track_id`],
+    uri: row[`${prefix}_pt_provider_uri`] || "",
+    catalogId: row[`${prefix}_pt_catalog_id`] || "",
+    appleType: row[`${prefix}_pt_apple_type`] || "",
+    title: row[`${prefix}_pt_title`],
+    artists: safeJson(row[`${prefix}_pt_artists_json`], []),
+    album: row[`${prefix}_pt_album`] || "",
+    isrc: row[`${prefix}_pt_isrc`] || "",
+    durationMs: row[`${prefix}_pt_duration_ms`] || 0,
+    artworkUrl: row[`${prefix}_pt_artwork_url`] || "",
+    url: row[`${prefix}_pt_external_url`] || "",
   };
 }
 

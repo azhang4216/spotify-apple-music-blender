@@ -181,58 +181,70 @@ button:disabled {
   box-shadow: 0 10px 22px rgba(93, 59, 23, 0.08);
 }
 
-.top-account .service-icon {
+.top-account .service-icon,
+.export-row .service-icon {
   width: 28px;
   height: 28px;
   flex: 0 0 auto;
 }
 
-.top-account .spotify-logo {
+.top-account .spotify-logo,
+.export-row .spotify-logo {
   background: var(--spotify);
 }
 
-.top-account .apple-logo {
+.top-account .apple-logo,
+.export-row .apple-logo {
   background: var(--apple);
 }
 
 .top-account .spotify-logo::before,
 .top-account .spotify-logo::after,
-.top-account .spotify-logo span {
+.top-account .spotify-logo span,
+.export-row .spotify-logo::before,
+.export-row .spotify-logo::after,
+.export-row .spotify-logo span {
   left: 7px;
   width: 15px;
   height: 6px;
   border-top-width: 2px;
 }
 
-.top-account .spotify-logo::before {
+.top-account .spotify-logo::before,
+.export-row .spotify-logo::before {
   top: 8px;
 }
 
-.top-account .spotify-logo span {
+.top-account .spotify-logo span,
+.export-row .spotify-logo span {
   top: 12px;
   width: 13px;
 }
 
-.top-account .spotify-logo::after {
+.top-account .spotify-logo::after,
+.export-row .spotify-logo::after {
   top: 16px;
   width: 11px;
 }
 
-.top-account .apple-logo span {
+.top-account .apple-logo span,
+.export-row .apple-logo span {
   top: 6px;
   left: 15px;
   width: 3px;
   height: 15px;
 }
 
-.top-account .apple-logo span::before {
+.top-account .apple-logo span::before,
+.export-row .apple-logo span::before {
   left: -8px;
   bottom: -1px;
   width: 10px;
   height: 8px;
 }
 
-.top-account .apple-logo span::after {
+.top-account .apple-logo span::after,
+.export-row .apple-logo span::after {
   top: 1px;
   left: 1px;
   width: 8px;
