@@ -613,13 +613,9 @@ async function connectPotatunesSpotify(accessToken) {
 async function connectPotatunesApple(musicUserToken) {
   if (!apiBase() || !musicUserToken) return null;
   try {
-    const savedDisplayName = cleanDisplay(getStoredItem(STORAGE.appleDisplayName));
     const body = await apiRequest("/api/auth/apple", {
       method: "POST",
-      body: {
-        musicUserToken,
-        displayName: savedDisplayName || state.session?.profile?.name || APPLE_PLACEHOLDER_NAME,
-      },
+      body: { musicUserToken },
     });
     return savePotatunesAuth(body);
   } catch {
@@ -661,22 +657,6 @@ async function ensureAppleDisplayName() {
       // The local nickname still works for this browser if the backend is unavailable.
     }
   }
-}
-
-async function ensureAppleLocalDisplayName() {
-  if (state.session?.service !== "apple") return "";
-
-  const currentName = cleanDisplay(getStoredItem(STORAGE.appleDisplayName)) || state.session.profile?.name || "";
-  if (!isPlaceholderAppleName(currentName)) {
-    state.session.profile.name = currentName;
-    setStoredItem(STORAGE.appleDisplayName, currentName);
-    return currentName;
-  }
-
-  const displayName = await requestNamePrompt();
-  state.session.profile.name = displayName;
-  setStoredItem(STORAGE.appleDisplayName, displayName);
-  return displayName;
 }
 
 function isPlaceholderAppleName(name) {
@@ -767,7 +747,6 @@ async function connectApple() {
       tracks: [],
     };
     state.welcomeBack = returningUser;
-    await ensureAppleLocalDisplayName();
     const auth = await connectPotatunesApple(userToken || music.musicUserToken || "");
     if (auth?.user?.displayName) state.session.profile.name = auth.user.displayName;
     await ensureAppleDisplayName();
