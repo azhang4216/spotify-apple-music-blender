@@ -78,6 +78,7 @@ const state = {
   readyToMash: false,
   mashComplete: false,
   welcomeBack: false,
+  redirectingToSpotify: false,
   loading: defaultLoadingState(),
 };
 
@@ -409,10 +410,17 @@ async function beginSpotifyAuth(action = "collect") {
     state: csrfState,
   }).toString();
 
-  window.location.assign(authUrl.toString());
+  try {
+    state.redirectingToSpotify = true;
+    window.location.assign(authUrl.toString());
+  } catch (error) {
+    state.redirectingToSpotify = false;
+    throw error;
+  }
 }
 
 async function handleSpotifyCallback() {
+  state.redirectingToSpotify = false;
   const params = new URLSearchParams(window.location.search);
   const code = params.get("code");
   const oauthError = params.get("error");
@@ -452,8 +460,10 @@ async function handleSpotifyCallback() {
   } catch (error) {
     setStatus(error.message || "Spotify sign-in failed.", "error");
   } finally {
-    setBusy(false);
-    render();
+    if (!state.redirectingToSpotify) {
+      setBusy(false);
+      render();
+    }
   }
 
   return true;
@@ -535,7 +545,7 @@ async function finishSpotifyConnection({ returning = false } = {}) {
   };
   renderCollecting("Spotify", 0, 4, {
     title: returning ? "Logging you back in..." : "Finding your songs",
-    copy: returning ? "Checking your saved potato sack." : undefined,
+    copy: returning ? returningLoginCopy("spotify") : undefined,
     counter: returning ? "..." : undefined,
     progress: returning ? 14 : undefined,
     updateProgress: !returning,
@@ -548,10 +558,29 @@ async function finishSpotifyConnection({ returning = false } = {}) {
     await finishCollection();
     return;
   }
+  if (returning) {
+    setLoadingProgress("yourSongs", 22, {
+      copy: providerUpdateCopy("spotify"),
+      counter: "...",
+    });
+    await waitForPaint();
+  }
   const tracks = await fetchSpotifySavedTracks(accessToken);
   state.session.tracks = dedupeTracks(tracks);
 
   await finishCollection();
+}
+
+function returningLoginCopy(service) {
+  return `Checking your saved sack. If it is stale, Potatunes updates it with your latest ${providerSongLabel(service)}.`;
+}
+
+function providerUpdateCopy(service) {
+  return `Updating with your latest ${providerSongLabel(service)}.`;
+}
+
+function providerSongLabel(service) {
+  return service === "apple" ? "Apple Music liked songs" : "Spotify favorite songs";
 }
 
 async function fetchSpotifyProfile(accessToken) {
@@ -744,7 +773,7 @@ async function connectApple() {
     await ensureAppleDisplayName();
     renderCollecting("Apple Music", 0, 4, {
       title: returningUser ? "Logging you back in..." : "Finding your songs",
-      copy: returningUser ? "Checking your saved potato sack." : undefined,
+      copy: returningUser ? returningLoginCopy("apple") : undefined,
       counter: returningUser ? "..." : undefined,
       progress: returningUser ? 14 : undefined,
       updateProgress: !returningUser,
@@ -752,6 +781,13 @@ async function connectApple() {
     if (await useStoredLibrarySnapshotIfFresh()) {
       await finishCollection();
       return;
+    }
+    if (returningUser) {
+      setLoadingProgress("yourSongs", 22, {
+        copy: providerUpdateCopy("apple"),
+        counter: "...",
+      });
+      await waitForPaint();
     }
     const tracks = await fetchAppleLibrarySongs(music);
     state.session.tracks = dedupeTracks(await preferAppleLikedTracks(tracks, music));
@@ -2002,8 +2038,10 @@ async function createPlaylist(targetService) {
   } catch (error) {
     setStatus(error.message || "Could not plant that playlist.", "error");
   } finally {
-    setBusy(false);
-    render();
+    if (!state.redirectingToSpotify) {
+      setBusy(false);
+      render();
+    }
   }
 }
 
@@ -2176,7 +2214,20 @@ async function createApplePlaylist({ retryAuth = true } = {}) {
 }
 
 function playlistName() {
-  return `Potatunes ${new Date().toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+  const monthYear = new Date().toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  return `Potatunes - ${playlistMashTitle()} (${monthYear})`;
+}
+
+function playlistMashTitle() {
+  if (state.activeBlend) return mashTitle(state.activeBlend);
+
+  const left = cleanPlaylistNamePart(state.session?.profile?.name || "You");
+  const right = cleanPlaylistNamePart(state.invite?.host?.name || "Spuddy");
+  return `${left} & ${possessive(right)} mash`;
+}
+
+function cleanPlaylistNamePart(value) {
+  return cleanDisplay(value || "").slice(0, 80) || "Spuddy";
 }
 
 async function copyInviteLink() {
@@ -2857,9 +2908,11 @@ function renderBackButton() {
 function renderAccountPanel() {
   const name = state.session?.profile?.name || "Potatunes listener";
   const service = serviceName(state.session?.service);
+  const songCount = state.session?.tracks?.length || state.session?.librarySnapshot?.trackCount || 0;
+  const profileLine = `${name} (${service}) - ${formatSongCount(songCount)}`;
   els.accountSummary.textContent = state.welcomeBack
-    ? `Welcome back! ${name} (${service})`
-    : `${name} (${service})`;
+    ? `Welcome back! ${profileLine}`
+    : profileLine;
 
   if (!state.blendHistory.length) {
     els.blendHistoryList.innerHTML = `<p class="empty-copy">No mashes yet.</p>`;
@@ -2884,6 +2937,11 @@ function renderAccountPanel() {
       `;
     })
     .join("");
+}
+
+function formatSongCount(count) {
+  const value = Number(count || 0);
+  return `${value.toLocaleString()} song${value === 1 ? "" : "s"}`;
 }
 
 function friendAvatarHtml(blend) {
