@@ -785,13 +785,13 @@ async function configureMusicKit() {
 }
 
 async function fetchAppleLibrarySongs(music) {
-  const musicKitTracks = await fetchAppleLibrarySongsWithMusicKit(music).catch(() => []);
-  if (musicKitTracks.length) return musicKitTracks;
+  const favoriteTracks = await fetchAppleFavoritePlaylistTracks().catch(() => []);
+  if (favoriteTracks.length) return favoriteTracks;
 
   const apiTracks = await fetchAppleLibrarySongsWithApi().catch(() => []);
   if (apiTracks.length) return apiTracks;
 
-  return await fetchAppleFavoritePlaylistTracks().catch(() => []);
+  return await fetchAppleLibrarySongsWithMusicKit(music).catch(() => []);
 }
 
 async function fetchAppleLibrarySongsWithMusicKit(music) {
@@ -2678,10 +2678,12 @@ function saveAppSnapshot() {
   sessionStorage.setItem(
     STORAGE.appSnapshot,
     JSON.stringify({
-      invite: state.invite,
-      session: state.session,
+      invite: compactSnapshotInvite(state.invite),
+      session: compactSnapshotSession(state.session),
+      activeBlend: state.activeBlend,
+      matches: state.matches.map(compactSnapshotMatch),
       shareLink: state.shareLink,
-      myInvite: state.myInvite,
+      myInvite: compactSnapshotInvite(state.myInvite),
       myShareLink: state.myShareLink,
       invitePayload: state.invitePayload,
       readyToMash: state.readyToMash,
@@ -2708,13 +2710,51 @@ function restoreAppSnapshot() {
       tracks: (snapshot.session.tracks || []).map((track) => toTrack(track)),
     }
     : null;
+  state.activeBlend = snapshot.activeBlend || null;
+  state.matches = Array.isArray(snapshot.matches)
+    ? snapshot.matches.map((match) => ({
+      score: Number(match.score || 0),
+      reason: match.reason || "",
+      hostTrack: toTrack(match.hostTrack),
+      yourTrack: toTrack(match.yourTrack),
+    }))
+    : [];
   state.shareLink = snapshot.shareLink || "";
   state.myInvite = snapshot.myInvite || null;
   state.myShareLink = snapshot.myShareLink || "";
   state.invitePayload = snapshot.invitePayload || "";
-  state.matches = state.invite && state.session ? matchTracks(state.invite.tracks, state.session.tracks) : [];
+  if (!state.matches.length && state.invite?.tracks?.length && state.session?.tracks?.length) {
+    state.matches = matchTracks(state.invite.tracks, state.session.tracks);
+  }
   state.readyToMash = Boolean(snapshot.readyToMash && state.invite && state.session && !state.matches.length);
   state.mashComplete = Boolean(snapshot.mashComplete || state.matches.length);
+}
+
+function compactSnapshotSession(session) {
+  if (!session) return null;
+  return {
+    service: session.service,
+    profile: session.profile,
+    tracks: [],
+    librarySnapshot: session.librarySnapshot || null,
+  };
+}
+
+function compactSnapshotInvite(invite) {
+  if (!invite) return null;
+  return {
+    ...invite,
+    tracks: [],
+  };
+}
+
+function compactSnapshotMatch(match) {
+  return {
+    score: match.score,
+    reason: match.reason,
+    hostTrack: compactHistoryTrack(match.hostTrack),
+    yourTrack: compactHistoryTrack(match.yourTrack),
+  };
 }
 
 function render() {
