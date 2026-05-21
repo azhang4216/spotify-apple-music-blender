@@ -147,6 +147,10 @@ function bindElements() {
     "nameModal",
     "nameSaveButton",
     "progressFill",
+    "remashNoButton",
+    "remashNotice",
+    "remashNoticeCopy",
+    "remashYesButton",
     "resetButton",
     "resultCopy",
     "resultNextButton",
@@ -220,6 +224,8 @@ function attachEvents() {
   els.blendHistoryList.addEventListener("click", openBlendHistory);
   els.resultPrevButton.addEventListener("click", () => changeResultPage(-1));
   els.resultNextButton.addEventListener("click", () => changeResultPage(1));
+  els.remashYesButton.addEventListener("click", remashActiveBlend);
+  els.remashNoButton.addEventListener("click", dismissRemashNotice);
   els.nameForm.addEventListener("submit", submitNamePrompt);
   window.addEventListener("hashchange", () => {
     if (state.busy) return;
@@ -400,7 +406,7 @@ async function beginSpotifyAuth(action = "collect") {
   );
 
   const authUrl = new URL("https://accounts.spotify.com/authorize");
-  authUrl.search = new URLSearchParams({
+  const authParams = {
     response_type: "code",
     client_id: state.config.spotifyClientId,
     scope,
@@ -408,11 +414,13 @@ async function beginSpotifyAuth(action = "collect") {
     code_challenge_method: "S256",
     code_challenge: challenge,
     state: csrfState,
-  }).toString();
+  };
+  if (action === "export-spotify") authParams.show_dialog = "true";
+  authUrl.search = new URLSearchParams(authParams).toString();
 
   try {
     state.redirectingToSpotify = true;
-    window.location.assign(authUrl.toString());
+    window.location.href = authUrl.toString();
   } catch (error) {
     state.redirectingToSpotify = false;
     throw error;
@@ -2444,6 +2452,24 @@ async function fetchBlendById(blendId) {
   return body.blend || null;
 }
 
+async function fetchBlendSnapshots(blendId) {
+  const body = await apiRequest(`/api/blends/${encodeURIComponent(blendId)}/snapshots`, {
+    auth: true,
+  });
+  return body.snapshots || null;
+}
+
+async function refreshBackendBlend(blendId, matches) {
+  const body = await apiRequest(`/api/blends/${encodeURIComponent(blendId)}/refresh`, {
+    method: "POST",
+    auth: true,
+    body: {
+      matches: matches.map(backendMatchPayload),
+    },
+  });
+  return body.blend || null;
+}
+
 function blendSummaryFromApi(blend) {
   const currentUserId = state.potatunesAuth?.user?.id || "";
   const friend = blend.friend || (blend.host?.id === currentUserId ? blend.guest : blend.host) || {};
@@ -2473,6 +2499,8 @@ function activateApiBlend(blend) {
     hostService: blend.host?.provider || "unknown",
     guestName: blend.guest?.displayName || "A spuddy",
     guestService: blend.guest?.provider || "unknown",
+    freshness: blend.freshness || null,
+    remashDismissed: false,
     matches: (blend.tracks || []).map((track) => matchFromApiBlendTrack(track, blend)),
   };
   state.matches = state.activeBlend.matches;
@@ -2580,6 +2608,81 @@ async function openBlendHistory(event) {
   const button = event.target.closest("[data-blend-id]");
   if (!button) return;
   await openBlendById(button.dataset.blendId, { navigate: true });
+}
+
+function dismissRemashNotice() {
+  if (state.activeBlend) state.activeBlend.remashDismissed = true;
+  render();
+}
+
+async function remashActiveBlend() {
+  if (state.busy || !canShowRemashNotice()) return;
+
+  try {
+    setBusy(true);
+    startLoadingFlow("mash", {
+      title: "Re-mashing",
+      copy: "Digging up the freshest sacks.",
+      counter: "...",
+      progress: 18,
+      steps: ["spuddySongs", "mash", "generate"],
+      showArtwork: false,
+    });
+    await waitForPaint();
+
+    const snapshots = await fetchBlendSnapshots(state.activeBlend.id);
+    const hostTracks = (snapshots?.host?.tracks || []).map(trackFromSnapshot);
+    const guestTracks = (snapshots?.guest?.tracks || []).map(trackFromSnapshot);
+    if (!hostTracks.length || !guestTracks.length) {
+      throw new Error("Could not load the latest songs for this mash.");
+    }
+
+    markLoadingStepDone("spuddySongs", {
+      copy: `${hostTracks.length + guestTracks.length} fresh tunes loaded.`,
+      counter: String(hostTracks.length + guestTracks.length),
+      showArtwork: false,
+    });
+    setLoadingProgress("mash", 54, {
+      copy: "Mashing fresh overlaps.",
+      counter: "...",
+      showArtwork: false,
+    });
+    await waitForPaint();
+
+    const matches = matchTracks(hostTracks, guestTracks);
+    markLoadingStepDone("mash", {
+      copy: `${matches.length} overlaps mashed.`,
+      counter: String(matches.length),
+      showArtwork: false,
+    });
+    setLoadingProgress("generate", 72, {
+      title: "Saving",
+      copy: "Packing the fresh mash.",
+      counter: String(matches.length),
+      showArtwork: false,
+    });
+
+    const blend = await refreshBackendBlend(state.activeBlend.id, matches);
+    if (blend) activateApiBlend(blend);
+    await refreshBlendHistory();
+    markLoadingStepDone("generate", {
+      copy: "Fresh mash ready.",
+      counter: String(state.matches.length),
+      showArtwork: false,
+    });
+    setRoute(`/mash/${encodeURIComponent(state.activeBlend.id)}`);
+    setStatus(`Fresh mash ready with ${state.matches.length} shared tune${state.matches.length === 1 ? "" : "s"}.`, "info");
+  } catch (error) {
+    const existingBlendId = error.data?.existingBlend?.id;
+    if (existingBlendId) {
+      const blend = await fetchBlendById(existingBlendId).catch(() => null);
+      if (blend) activateApiBlend(blend);
+    }
+    setStatus(error.message || "Could not re-mash those songs.", "error");
+  } finally {
+    setBusy(false);
+    render();
+  }
 }
 
 async function openBlendById(blendId, { navigate = true } = {}) {
@@ -2980,6 +3083,8 @@ function renderResults() {
       statHtml(matchCount, "Shared spuds"),
     ].join("");
 
+  renderRemashNotice();
+
   els.matchList.innerHTML = pageMatches
     .map((match) => matchRowHtml(match))
     .join("") || `<div class="notice">No matches found. Try exporting both libraries and reviewing titles manually.</div>`;
@@ -2988,6 +3093,29 @@ function renderResults() {
   els.resultPageLabel.textContent = `Page ${state.resultPage} of ${totalPages}`;
   els.resultPrevButton.disabled = state.busy || state.resultPage <= 1;
   els.resultNextButton.disabled = state.busy || state.resultPage >= totalPages;
+}
+
+function renderRemashNotice() {
+  if (!canShowRemashNotice()) {
+    els.remashNotice.classList.add("hidden");
+    return;
+  }
+
+  const names = state.activeBlend.freshness.updatedUsers
+    .map((user) => user.displayName || "A spuddy")
+    .filter(Boolean);
+  const subject = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0] || "A spuddy";
+  els.remashNoticeCopy.textContent = `${subject} ${names.length > 1 ? "have" : "has"} had songs updated since this mash was generated. Re-mash for most up-to-date results?`;
+  els.remashNotice.classList.remove("hidden");
+}
+
+function canShowRemashNotice() {
+  return Boolean(
+    state.activeBlend?.source === "api" &&
+    state.activeBlend?.freshness?.isStale &&
+    state.activeBlend?.freshness?.updatedUsers?.length &&
+    !state.activeBlend?.remashDismissed,
+  );
 }
 
 function mashTitle(blend) {
@@ -3067,6 +3195,8 @@ function renderButtons() {
     els.appleExportButton,
     els.resultPrevButton,
     els.resultNextButton,
+    els.remashYesButton,
+    els.remashNoButton,
   ].forEach((button) => {
     button.disabled = disabled;
   });
@@ -3081,6 +3211,8 @@ function renderButtons() {
   const totalPages = Math.max(1, Math.ceil(state.matches.length / RESULTS_PAGE_SIZE));
   els.resultPrevButton.disabled = disabled || state.resultPage <= 1;
   els.resultNextButton.disabled = disabled || state.resultPage >= totalPages;
+  els.remashYesButton.disabled = disabled || !canShowRemashNotice();
+  els.remashNoButton.disabled = disabled || !canShowRemashNotice();
 }
 
 function renderCollecting(serviceNameText, count, total, options = {}) {

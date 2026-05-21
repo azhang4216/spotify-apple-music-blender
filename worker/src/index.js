@@ -166,6 +166,18 @@ async function handleApi(request, env, url, corsHeaders) {
     return json({ blend: await createBlend(db, body) }, 201, corsHeaders);
   }
 
+  if (resource === "blends" && request.method === "GET" && id && child === "snapshots") {
+    const auth = requireSession(session);
+    const blend = serializeBlend(await findBlendRow(db, id));
+    assertBlendAccess(auth, blend);
+    return json({ snapshots: await getBlendLatestSnapshots(db, blend, true) }, 200, corsHeaders);
+  }
+
+  if (resource === "blends" && request.method === "POST" && id && child === "refresh") {
+    const auth = requireSession(session);
+    return json({ blend: await refreshBlend(db, auth, id, await readJson(request)) }, 201, corsHeaders);
+  }
+
   if (resource === "blends" && request.method === "GET" && id) {
     const blend = await getBlend(db, id);
     assertBlendAccess(requireSession(session), blend);
@@ -577,6 +589,25 @@ async function createBlend(db, body) {
     });
   }
   const refreshedFromBlendId = assertBlendRefreshAllowed(existingBlend, Boolean(body.refresh));
+
+  const blend = await insertBlendWithMatches(db, {
+    inviteId: invite.id,
+    hostUserId: invite.owner_user_id,
+    guestUserId,
+    hostSnapshotId: invite.owner_snapshot_id,
+    guestSnapshotId: guestSnapshotId || null,
+    matches,
+  });
+
+  await db.prepare("UPDATE blend_invites SET status = 'used' WHERE id = ?").bind(invite.id).run();
+  if (refreshedFromBlendId) {
+    blend.refreshedFromBlendId = refreshedFromBlendId;
+    blend.warning = "Refreshed an older mashed playlist for this spuddy pair.";
+  }
+  return blend;
+}
+
+async function insertBlendWithMatches(db, { inviteId, hostUserId, guestUserId, hostSnapshotId, guestSnapshotId, matches }) {
   const blendId = newId("blend");
   const now = nowIso();
 
@@ -588,10 +619,10 @@ async function createBlend(db, body) {
     `)
     .bind(
       blendId,
-      invite.id,
-      invite.owner_user_id,
+      inviteId || null,
+      hostUserId,
       guestUserId,
-      invite.owner_snapshot_id,
+      hostSnapshotId || null,
       guestSnapshotId || null,
       matches.length,
       now,
@@ -630,13 +661,44 @@ async function createBlend(db, body) {
     }
   }
 
-  await db.prepare("UPDATE blend_invites SET status = 'used' WHERE id = ?").bind(invite.id).run();
-  const blend = await getBlend(db, blendId);
-  if (refreshedFromBlendId) {
-    blend.refreshedFromBlendId = refreshedFromBlendId;
-    blend.warning = "Refreshed an older mashed playlist for this spuddy pair.";
+  return await getBlend(db, blendId);
+}
+
+async function refreshBlend(db, session, blendId, body) {
+  const baseBlend = serializeBlend(await findBlendRow(db, blendId));
+  assertBlendAccess(session, baseBlend);
+
+  const latestBlend = await findLatestBlendForPair(db, baseBlend.hostUserId, baseBlend.guestUserId);
+  if (latestBlend && latestBlend.id !== blendId) {
+    const latestFreshness = await getBlendFreshness(db, latestBlend);
+    if (!latestFreshness.isStale) {
+      const current = await getBlend(db, latestBlend.id);
+      current.warning = "This mash has already been refreshed.";
+      return current;
+    }
   }
-  return blend;
+
+  const freshness = await getBlendFreshness(db, await findBlendRow(db, blendId));
+  if (!freshness.isStale) {
+    throw new ApiError(409, "This mash is already up to date.", {
+      code: "blend_current",
+      freshness,
+    });
+  }
+
+  const latestSnapshots = await getBlendLatestSnapshots(db, baseBlend, false);
+  const matches = Array.isArray(body.matches) ? body.matches : [];
+  const refreshed = await insertBlendWithMatches(db, {
+    inviteId: baseBlend.inviteId || null,
+    hostUserId: baseBlend.hostUserId,
+    guestUserId: baseBlend.guestUserId,
+    hostSnapshotId: latestSnapshots.host?.id || baseBlend.hostSnapshotId,
+    guestSnapshotId: latestSnapshots.guest?.id || baseBlend.guestSnapshotId,
+    matches,
+  });
+  refreshed.refreshedFromBlendId = blendId;
+  refreshed.warning = "Refreshed with the latest song snapshots.";
+  return refreshed;
 }
 
 async function findLatestBlendForPair(db, userAId, userBId) {
@@ -713,7 +775,7 @@ function summarizeExistingBlend(row, refreshAvailableAt) {
   };
 }
 
-async function getBlend(db, blendId) {
+async function findBlendRow(db, blendId) {
   const blend = await db
     .prepare(`
       SELECT
@@ -732,7 +794,11 @@ async function getBlend(db, blendId) {
     .bind(blendId)
     .first();
   if (!blend) throw new ApiError(404, "Blend not found.");
+  return blend;
+}
 
+async function getBlend(db, blendId) {
+  const blend = await findBlendRow(db, blendId);
   const tracks = await db
     .prepare(`
       SELECT
@@ -778,9 +844,103 @@ async function getBlend(db, blendId) {
 
   return {
     ...serializeBlend(blend),
+    freshness: await getBlendFreshness(db, blend),
     tracks: (tracks.results || []).map(serializeBlendTrack),
     exports: (exports.results || []).map(serializePlaylistExport),
   };
+}
+
+async function getBlendLatestSnapshots(db, blend, includeTracks) {
+  const hostUserId = blend.hostUserId || blend.host_user_id;
+  const guestUserId = blend.guestUserId || blend.guest_user_id;
+  const host = await latestLibrarySnapshotRow(db, hostUserId);
+  const guest = await latestLibrarySnapshotRow(db, guestUserId);
+  return {
+    host: host ? await serializeSnapshotWithOptionalTracks(db, host, includeTracks) : null,
+    guest: guest ? await serializeSnapshotWithOptionalTracks(db, guest, includeTracks) : null,
+  };
+}
+
+async function serializeSnapshotWithOptionalTracks(db, row, includeTracks) {
+  const snapshot = serializeSnapshot(row);
+  return includeTracks ? { ...snapshot, tracks: await getSnapshotTracks(db, row.id) } : snapshot;
+}
+
+async function getBlendFreshness(db, blend) {
+  const latestSnapshots = await getBlendLatestSnapshots(db, blend, false);
+  const updatedUsers = [];
+  const hostUpdate = await snapshotUpdateForRole(db, blend, "host", latestSnapshots.host);
+  const guestUpdate = await snapshotUpdateForRole(db, blend, "guest", latestSnapshots.guest);
+  if (hostUpdate) updatedUsers.push(hostUpdate);
+  if (guestUpdate) updatedUsers.push(guestUpdate);
+  return {
+    isStale: updatedUsers.length > 0,
+    updatedUsers,
+  };
+}
+
+async function snapshotUpdateForRole(db, blend, role, latestSnapshot) {
+  const blendCreatedAt = Date.parse(blend.created_at || blend.createdAt || "");
+  const latestCreatedAt = Date.parse(latestSnapshot?.createdAt || "");
+  const previousSnapshotId = role === "host"
+    ? blend.host_snapshot_id || blend.hostSnapshotId
+    : blend.guest_snapshot_id || blend.guestSnapshotId;
+  if (!previousSnapshotId || !latestSnapshot?.id || previousSnapshotId === latestSnapshot.id) return null;
+  if (!Number.isFinite(blendCreatedAt) || !Number.isFinite(latestCreatedAt) || latestCreatedAt <= blendCreatedAt) {
+    return null;
+  }
+
+  const changed = await snapshotSongSetChanged(db, previousSnapshotId, latestSnapshot.id);
+  if (!changed) return null;
+
+  return {
+    role,
+    userId: role === "host" ? blend.host_user_id || blend.hostUserId : blend.guest_user_id || blend.guestUserId,
+    provider: role === "host" ? blend.host_provider || blend.host?.provider : blend.guest_provider || blend.guest?.provider,
+    displayName: role === "host"
+      ? blend.host_display_name || blend.host?.displayName || "A spuddy"
+      : blend.guest_display_name || blend.guest?.displayName || "A spuddy",
+    previousSnapshotId,
+    latestSnapshot,
+  };
+}
+
+async function snapshotSongSetChanged(db, previousSnapshotId, latestSnapshotId) {
+  if (!previousSnapshotId || !latestSnapshotId || previousSnapshotId === latestSnapshotId) return false;
+  const row = await db
+    .prepare(`
+      WITH
+        previous_tracks AS (
+          SELECT DISTINCT pt.track_id
+          FROM library_tracks lt
+          JOIN provider_tracks pt ON pt.id = lt.provider_track_id
+          WHERE lt.snapshot_id = ?
+        ),
+        latest_tracks AS (
+          SELECT DISTINCT pt.track_id
+          FROM library_tracks lt
+          JOIN provider_tracks pt ON pt.id = lt.provider_track_id
+          WHERE lt.snapshot_id = ?
+        )
+      SELECT
+        (
+          SELECT COUNT(*) FROM (
+            SELECT track_id FROM previous_tracks
+            EXCEPT
+            SELECT track_id FROM latest_tracks
+          )
+        ) +
+        (
+          SELECT COUNT(*) FROM (
+            SELECT track_id FROM latest_tracks
+            EXCEPT
+            SELECT track_id FROM previous_tracks
+          )
+        ) AS diff_count
+    `)
+    .bind(previousSnapshotId, latestSnapshotId)
+    .first();
+  return Number(row?.diff_count || 0) > 0;
 }
 
 async function listUserBlends(db, userId, url) {
