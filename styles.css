@@ -1292,6 +1292,48 @@ textarea {
   font-weight: 800;
 }
 
+.source-card {
+  max-height: min(82vh, 620px);
+}
+
+.source-list {
+  display: grid;
+  max-height: min(54vh, 360px);
+  gap: 8px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.source-choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fffaf0;
+}
+
+.source-choice input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--potato-dark);
+}
+
+.source-choice strong,
+.source-choice small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-choice small {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
 @media (max-width: 640px) {
   .page-shell {
     width: min(100% - 20px, 1180px);

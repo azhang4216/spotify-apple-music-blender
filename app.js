@@ -55,6 +55,14 @@ const VERSION_WORDS = new Set([
 
 const PENALTY_VERSION_WORDS = new Set(["acoustic", "instrumental", "karaoke", "live", "remix"]);
 const TITLE_STOP_WORDS = new Set(["a", "an", "and", "at", "by", "for", "from", "in", "me", "my", "of", "on", "or", "the", "to", "with", "you", "your"]);
+const SPOTIFY_AUTH_SCOPES = [
+  "user-library-read",
+  "user-read-private",
+  "playlist-read-private",
+  "playlist-read-collaborative",
+  "playlist-modify-private",
+  "playlist-modify-public",
+];
 const SPOTIFY_PLAYLIST_SCOPES = ["playlist-modify-private", "playlist-modify-public"];
 const RESULTS_PAGE_SIZE = 40;
 const LIBRARY_REFRESH_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
@@ -91,6 +99,8 @@ const LOADING_STEPS = [
 
 const els = {};
 let pendingNamePrompt = null;
+let pendingSourcePrompt = null;
+let pendingSourceOptions = [];
 
 document.addEventListener("DOMContentLoaded", init);
 
@@ -168,6 +178,10 @@ function bindElements() {
     "stepBlend",
     "stepCollect",
     "stepConnect",
+    "sourceForm",
+    "sourceList",
+    "sourceModal",
+    "sourceSaveButton",
     "topAccount",
     "verifiedCopy",
     "verifiedPanel",
@@ -227,6 +241,7 @@ function attachEvents() {
   els.remashYesButton.addEventListener("click", remashActiveBlend);
   els.remashNoButton.addEventListener("click", dismissRemashNotice);
   els.nameForm.addEventListener("submit", submitNamePrompt);
+  els.sourceForm.addEventListener("submit", submitSourcePrompt);
   window.addEventListener("hashchange", () => {
     if (state.busy) return;
     loadRouteFromLocation({ fromNavigation: true }).then(() => render());
@@ -358,7 +373,7 @@ async function connectService(service) {
     }
     sessionStorage.setItem(STORAGE.pendingInvite, JSON.stringify(state.invite));
     if (state.invitePayload) sessionStorage.setItem(STORAGE.pendingInvitePayload, state.invitePayload);
-    if (getStoredItem(STORAGE.spotifyToken)) {
+    if (getStoredItem(STORAGE.spotifyToken) && spotifyTokenHasAuthScopes()) {
       try {
         setBusy(true);
         await finishSpotifyConnection({ returning: returningUser });
@@ -369,6 +384,8 @@ async function connectService(service) {
         setBusy(false);
         render();
       }
+    } else if (getStoredItem(STORAGE.spotifyToken)) {
+      removeStoredItem(STORAGE.spotifyToken);
     }
     await beginSpotifyAuth("collect");
     return;
@@ -386,12 +403,7 @@ async function beginSpotifyAuth(action = "collect") {
   const verifier = randomString(96);
   const challenge = await pkceChallenge(verifier);
   const csrfState = randomString(32);
-  const scope = [
-    "user-library-read",
-    "user-read-private",
-    "playlist-modify-private",
-    "playlist-modify-public",
-  ].join(" ");
+  const scope = SPOTIFY_AUTH_SCOPES.join(" ");
 
   sessionStorage.setItem(
     STORAGE.spotifyOAuth,
@@ -573,7 +585,9 @@ async function finishSpotifyConnection({ returning = false } = {}) {
     });
     await waitForPaint();
   }
-  const tracks = await fetchSpotifySavedTracks(accessToken);
+  const sourceOptions = await fetchSpotifySourceOptions(accessToken, state.session.profile);
+  const selectedSources = await requestSourcePrompt(sourceOptions);
+  const tracks = await fetchSpotifyTracksFromSources(accessToken, selectedSources);
   state.session.tracks = dedupeTracks(tracks);
 
   await finishCollection();
@@ -588,7 +602,7 @@ function providerUpdateCopy(service) {
 }
 
 function providerSongLabel(service) {
-  return service === "apple" ? "Apple Music liked songs" : "Spotify favorite songs";
+  return service === "apple" ? "Apple Music songs" : "Spotify songs";
 }
 
 async function fetchSpotifyProfile(accessToken) {
@@ -690,6 +704,57 @@ function submitNamePrompt(event) {
   resolve?.(displayName);
 }
 
+function requestSourcePrompt(options) {
+  const usableOptions = options.filter((option) => option.id && option.label);
+  if (!usableOptions.length) return Promise.resolve([]);
+
+  return new Promise((resolve) => {
+    pendingSourcePrompt = resolve;
+    pendingSourceOptions = usableOptions;
+    els.sourceList.innerHTML = usableOptions.map(sourceOptionHtml).join("");
+    els.sourceModal.classList.remove("hidden");
+    window.setTimeout(() => els.sourceList.querySelector("input")?.focus(), 0);
+  });
+}
+
+function sourceOptionHtml(option) {
+  const count = Number(option.count || 0);
+  const detail = [
+    sourceKindLabel(option.kind),
+    count ? `${count.toLocaleString()} song${count === 1 ? "" : "s"}` : "",
+  ].filter(Boolean).join(" · ");
+  return `
+    <label class="source-choice">
+      <input type="checkbox" name="sources" value="${escapeAttribute(option.id)}" ${option.selected ? "checked" : ""} />
+      <span>
+        <strong>${escapeHtml(option.label)}</strong>
+        <small>${escapeHtml(detail)}</small>
+      </span>
+    </label>
+  `;
+}
+
+function sourceKindLabel(kind) {
+  if (kind === "liked" || kind === "favorite") return "Main saved songs";
+  if (kind === "library") return "Library";
+  return "Playlist";
+}
+
+function submitSourcePrompt(event) {
+  event.preventDefault();
+  const checkedIds = new Set(
+    [...els.sourceList.querySelectorAll("input[name='sources']:checked")].map((input) => input.value),
+  );
+  if (!checkedIds.size) return;
+
+  els.sourceModal.classList.add("hidden");
+  const selected = pendingSourceOptions.filter((option) => checkedIds.has(option.id));
+  const resolve = pendingSourcePrompt;
+  pendingSourcePrompt = null;
+  pendingSourceOptions = [];
+  resolve?.(selected);
+}
+
 async function fetchSpotifySavedTracks(accessToken) {
   const tracks = [];
   let url = "https://api.spotify.com/v1/me/tracks?limit=50&offset=0";
@@ -706,18 +771,7 @@ async function fetchSpotifySavedTracks(accessToken) {
     for (const item of body.items || []) {
       const track = item.track;
       if (!track || track.is_local) continue;
-      tracks.push(toTrack({
-        service: "spotify",
-        id: track.id,
-        uri: track.uri,
-        title: track.name,
-        artists: (track.artists || []).map((artist) => artist.name).filter(Boolean),
-        album: track.album?.name || "",
-        durationMs: track.duration_ms,
-        isrc: track.external_ids?.isrc || "",
-        artworkUrl: bestSpotifyImage(track.album?.images),
-        url: track.external_urls?.spotify || "",
-      }));
+      tracks.push(spotifyTrackObjectToTrack(track));
     }
 
     if (state.session?.service === "spotify") state.session.tracks = tracks;
@@ -726,6 +780,102 @@ async function fetchSpotifySavedTracks(accessToken) {
   }
 
   return tracks;
+}
+
+async function fetchSpotifySourceOptions(accessToken, profile) {
+  const playlists = await fetchSpotifyPlaylists(accessToken).catch(() => []);
+  return [
+    {
+      id: "spotify:liked",
+      kind: "liked",
+      label: "Liked songs",
+      selected: true,
+    },
+    ...playlists.map((playlist) => ({
+      id: `spotify:playlist:${playlist.id}`,
+      kind: "playlist",
+      label: playlist.name || "Untitled playlist",
+      count: playlist.tracks?.total || 0,
+      selected: false,
+      playlist,
+    })),
+  ];
+}
+
+async function fetchSpotifyPlaylists(accessToken) {
+  const playlists = [];
+  let url = "https://api.spotify.com/v1/me/playlists?limit=50&offset=0";
+
+  while (url) {
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(body.error?.message || "Could not read Spotify playlists.");
+    }
+    playlists.push(...(body.items || []).filter((playlist) => playlist?.id));
+    url = body.next;
+  }
+
+  return playlists;
+}
+
+async function fetchSpotifyTracksFromSources(accessToken, sources) {
+  const selectedSources = sources.length ? sources : [{ kind: "liked", label: "Liked songs" }];
+  const tracks = [];
+  const total = selectedSources.reduce((sum, source) => sum + Number(source.count || 0), 0);
+
+  for (const source of selectedSources) {
+    const sourceTracks = source.kind === "playlist"
+      ? await fetchSpotifyPlaylistTracks(accessToken, source.playlist).catch(() => [])
+      : await fetchSpotifySavedTracks(accessToken);
+    tracks.push(...sourceTracks);
+    state.session.tracks = dedupeTracks(tracks);
+    updateLibraryProgress(state.session.tracks.length, total || state.session.tracks.length);
+  }
+
+  return tracks;
+}
+
+async function fetchSpotifyPlaylistTracks(accessToken, playlist) {
+  const tracks = [];
+  let url = `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlist.id)}/items?limit=100&offset=0&additional_types=track`;
+
+  while (url) {
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(body.error?.message || `Could not read ${playlist.name || "that Spotify playlist"}.`);
+    }
+
+    for (const item of body.items || []) {
+      const track = item.track || item.item;
+      if (!track || track.type !== "track" || track.is_local) continue;
+      tracks.push(spotifyTrackObjectToTrack(track));
+    }
+
+    url = body.next;
+  }
+
+  return tracks;
+}
+
+function spotifyTrackObjectToTrack(track) {
+  return toTrack({
+    service: "spotify",
+    id: track.id,
+    uri: track.uri,
+    title: track.name,
+    artists: (track.artists || []).map((artist) => artist.name).filter(Boolean),
+    album: track.album?.name || "",
+    durationMs: track.duration_ms,
+    isrc: track.external_ids?.isrc || "",
+    artworkUrl: bestSpotifyImage(track.album?.images),
+    url: track.external_urls?.spotify || "",
+  });
 }
 
 function bestSpotifyImage(images = []) {
@@ -776,7 +926,11 @@ async function connectApple() {
       });
       await waitForPaint();
     }
-    const tracks = await fetchAppleLibrarySongs(music);
+    const sourceOptions = await fetchAppleSourceOptions().catch(() => []);
+    const selectedSources = await requestSourcePrompt(sourceOptions);
+    const tracks = selectedSources.length
+      ? await fetchAppleTracksFromSources(selectedSources, music)
+      : await fetchAppleLibrarySongs(music);
     state.session.tracks = dedupeTracks(await preferAppleLikedTracks(tracks, music));
     await finishCollection();
   } catch (error) {
@@ -815,6 +969,68 @@ async function fetchAppleLibrarySongs(music) {
   if (apiTracks.length) return apiTracks;
 
   return await fetchAppleLibrarySongsWithMusicKit(music).catch(() => []);
+}
+
+async function fetchAppleSourceOptions() {
+  const playlists = await fetchAppleLibraryPlaylists();
+  const favoritePlaylist = playlists.find(isFavoriteSongsPlaylist);
+  const playlistOptions = playlists
+    .filter((playlist) => !isFavoriteSongsPlaylist(playlist))
+    .map((playlist) => ({
+      id: `apple:playlist:${playlist.id}`,
+      kind: "playlist",
+      label: playlist.attributes?.name || "Untitled playlist",
+      count: applePlaylistTrackCount(playlist),
+      selected: false,
+      playlist,
+    }));
+
+  if (favoritePlaylist) {
+    return [
+      {
+        id: `apple:favorite:${favoritePlaylist.id}`,
+        kind: "favorite",
+        label: "Favorite Songs",
+        count: applePlaylistTrackCount(favoritePlaylist),
+        selected: true,
+        playlist: favoritePlaylist,
+      },
+      ...playlistOptions,
+    ];
+  }
+
+  return [
+    {
+      id: "apple:library",
+      kind: "library",
+      label: "Library songs",
+      selected: true,
+    },
+    ...playlistOptions,
+  ];
+}
+
+function applePlaylistTrackCount(playlist) {
+  return Number(playlist.attributes?.trackCount || playlist.relationships?.tracks?.data?.length || playlist.tracks?.total || 0);
+}
+
+async function fetchAppleTracksFromSources(sources, music) {
+  const tracks = [];
+  const selectedSources = sources.length ? sources : [{ kind: "library", label: "Library songs" }];
+
+  for (const source of selectedSources) {
+    const sourceTracks = source.kind === "library"
+      ? await fetchAppleLibrarySongsWithApi().catch(() => fetchAppleLibrarySongsWithMusicKit(music))
+      : await fetchAppleTrackPageSet(
+        `/v1/me/library/playlists/${encodeURIComponent(source.playlist.id)}/tracks`,
+        { appleSource: source.kind === "favorite" ? "favorite" : "playlist" },
+      ).catch(() => []);
+    tracks.push(...sourceTracks);
+    state.session.tracks = dedupeTracks(tracks);
+    updateLibraryProgress(state.session.tracks.length, state.session.tracks.length);
+  }
+
+  return tracks;
 }
 
 async function fetchAppleLibrarySongsWithMusicKit(music) {
@@ -3486,10 +3702,18 @@ function hasPriorServiceSession(service) {
 }
 
 function spotifyTokenHasPlaylistScopes() {
+  return spotifyTokenHasScopes(SPOTIFY_PLAYLIST_SCOPES);
+}
+
+function spotifyTokenHasAuthScopes() {
+  return spotifyTokenHasScopes(SPOTIFY_AUTH_SCOPES);
+}
+
+function spotifyTokenHasScopes(requiredScopes) {
   const token = safeJsonParse(getStoredItem(STORAGE.spotifyToken));
   if (!token?.accessToken) return false;
   const scopes = new Set(String(token.scope || "").split(/\s+/).filter(Boolean));
-  return SPOTIFY_PLAYLIST_SCOPES.every((scope) => scopes.has(scope));
+  return requiredScopes.every((scope) => scopes.has(scope));
 }
 
 function savePotatunesAuth(auth) {
