@@ -2396,7 +2396,7 @@ function openSpotifyPlaylist(playlist) {
   const url = playlist.external_urls?.spotify || playlist.uri || "";
   if (!url) return;
   window.setTimeout(() => {
-    window.location.href = url;
+    window.open(url, "_blank", "noopener,noreferrer");
   }, 600);
 }
 
