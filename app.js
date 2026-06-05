@@ -2327,7 +2327,6 @@ async function createSpotifyPlaylist({ retryAuth = true } = {}) {
     showArtwork: false,
   });
   const accessToken = await getSpotifyAccessToken();
-  const profile = await fetchSpotifyProfile(accessToken);
   const { items: uris, missing } = await resolveSpotifyPlaylistUris(accessToken);
   if (!uris.length) throw new Error("Spotify could not find any matching tracks.");
 
@@ -2336,7 +2335,7 @@ async function createSpotifyPlaylist({ retryAuth = true } = {}) {
     counter: String(uris.length),
     showArtwork: false,
   });
-  const created = await fetch(`https://api.spotify.com/v1/users/${encodeURIComponent(profile.id)}/playlists`, {
+  const created = await fetch("https://api.spotify.com/v1/me/playlists", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
