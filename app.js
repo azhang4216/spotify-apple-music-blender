@@ -111,6 +111,9 @@ async function init() {
   await loadExternalConfig();
   loadConfig();
   attachEvents();
+  if (!hasSpotifyCallbackParams()) {
+    await restoreCachedLogin();
+  }
   await loadRouteFromLocation();
 
   const handledSpotifyCallback = await handleSpotifyCallback();
@@ -473,7 +476,7 @@ async function handleSpotifyCallback() {
     saveSpotifyToken(token);
     if (oauth.action === "export-spotify") {
       restoreAppSnapshot();
-      await createSpotifyPlaylist();
+      await createSpotifyPlaylist({ retryAuth: false });
     } else {
       await finishSpotifyConnection({ returning: returningUser });
     }
@@ -487,6 +490,11 @@ async function handleSpotifyCallback() {
   }
 
   return true;
+}
+
+function hasSpotifyCallbackParams() {
+  const params = new URLSearchParams(window.location.search);
+  return params.has("code") || params.has("error");
 }
 
 async function exchangeSpotifyCode(code, oauth) {
@@ -635,9 +643,13 @@ async function connectPotatunesSpotify(accessToken) {
 async function connectPotatunesApple(musicUserToken) {
   if (!apiBase() || !musicUserToken) return null;
   try {
+    const displayName = cleanDisplay(state.session?.profile?.name || getStoredItem(STORAGE.appleDisplayName));
     const body = await apiRequest("/api/auth/apple", {
       method: "POST",
-      body: { musicUserToken },
+      body: {
+        musicUserToken,
+        ...(!isPlaceholderAppleName(displayName) ? { displayName } : {}),
+      },
     });
     return savePotatunesAuth(body);
   } catch {
@@ -657,10 +669,15 @@ async function ensureAppleDisplayName() {
     return;
   }
 
-  const displayName = await requestNamePrompt();
+  const storedName = cleanDisplay(getStoredItem(STORAGE.appleDisplayName));
+  const displayName = isPlaceholderAppleName(storedName) ? await requestNamePrompt() : storedName;
   state.session.profile.name = displayName;
   setStoredItem(STORAGE.appleDisplayName, displayName);
 
+  await saveAppleDisplayNameToBackend(displayName);
+}
+
+async function saveAppleDisplayNameToBackend(displayName) {
   if (state.potatunesAuth?.user?.provider === "apple" && state.potatunesAuth?.session?.token && apiBase()) {
     try {
       const body = await apiRequest("/api/me", {
@@ -2302,7 +2319,7 @@ function startPlaylistLoading(targetService) {
   renderLoadingPanel();
 }
 
-async function createSpotifyPlaylist() {
+async function createSpotifyPlaylist({ retryAuth = true } = {}) {
   if (!state.loading.active) startPlaylistLoading("spotify");
   setLoadingProgress("generate", 24, {
     copy: "Checking Spotify tracks.",
@@ -2334,9 +2351,12 @@ async function createSpotifyPlaylist() {
   const playlist = await created.json().catch(() => ({}));
   if (created.status === 401 || created.status === 403) {
     removeStoredItem(STORAGE.spotifyToken);
-    saveAppSnapshot();
-    await beginSpotifyAuth("export-spotify");
-    return;
+    if (retryAuth) {
+      saveAppSnapshot();
+      await beginSpotifyAuth("export-spotify");
+      return;
+    }
+    throw new Error(playlist.error?.message || "Spotify needs playlist permission. Reconnect Spotify and try again.");
   }
   if (!created.ok) throw new Error(playlist.error?.message || "Spotify playlist creation failed.");
 
@@ -2370,6 +2390,15 @@ async function createSpotifyPlaylist() {
     showArtwork: false,
   });
   setStatus(`Planted ${uris.length} tune${uris.length === 1 ? "" : "s"} in Spotify.${skipped}`, "info");
+  openSpotifyPlaylist(playlist);
+}
+
+function openSpotifyPlaylist(playlist) {
+  const url = playlist.external_urls?.spotify || playlist.uri || "";
+  if (!url) return;
+  window.setTimeout(() => {
+    window.location.href = url;
+  }, 600);
 }
 
 async function createApplePlaylist({ retryAuth = true } = {}) {
@@ -2617,6 +2646,8 @@ function saveCurrentBlendHistory() {
   const id = state.activeBlend?.id || state.invite.blendId || crypto.randomUUID?.() || randomString(24);
   const item = {
     id,
+    friendUserId: state.invite.host?.userId || "",
+    myUserId: state.potatunesAuth?.user?.id || "",
     matchedAt: new Date().toISOString(),
     friendName: state.invite.host?.name || "A friend",
     friendService: state.invite.host?.service || "unknown",
@@ -2634,7 +2665,7 @@ function saveCurrentBlendHistory() {
     })),
   };
 
-  const next = [item, ...state.blendHistory.filter((blend) => blend.id !== id)].slice(0, 25);
+  const next = dedupeBlendHistory([item, ...state.blendHistory.filter((blend) => blend.id !== id)]).slice(0, 25);
   state.blendHistory = next;
   saveBlendHistory(next);
 }
@@ -2692,8 +2723,11 @@ async function refreshBlendHistory() {
       auth: true,
     });
     const remote = (body.blends || []).map(blendSummaryFromApi).filter((blend) => !isSampleBlend(blend));
-    const remoteIds = new Set(remote.map((blend) => blend.id));
-    state.blendHistory = [...remote, ...localHistory.filter((blend) => !remoteIds.has(blend.id))].slice(0, 25);
+    const remoteKeys = blendHistoryKeySet(remote);
+    state.blendHistory = dedupeBlendHistory([
+      ...remote,
+      ...localHistory.filter((blend) => !blendHistoryOverlaps(remoteKeys, blend)),
+    ]).slice(0, 25);
   } catch {
     state.blendHistory = localHistory;
   }
@@ -2731,6 +2765,8 @@ function blendSummaryFromApi(blend) {
   return {
     id: blend.id,
     source: "api",
+    friendUserId: friend.id || "",
+    myUserId: me?.id || currentUserId,
     matchedAt: blend.createdAt,
     friendName: friend.displayName || "A spuddy",
     friendService: friend.provider || "unknown",
@@ -2838,7 +2874,7 @@ function loadBlendHistory() {
       saveBlendHistory([]);
       return [];
     }
-    const history = Array.isArray(parsed) ? parsed.filter((blend) => !isSampleBlend(blend)) : [];
+    const history = dedupeBlendHistory(Array.isArray(parsed) ? parsed.filter((blend) => !isSampleBlend(blend)) : []);
     if (history.length !== parsed.length) saveBlendHistory(history);
     return history;
   } catch {
@@ -2848,10 +2884,51 @@ function loadBlendHistory() {
 
 function saveBlendHistory(history) {
   try {
-    localStorage.setItem(STORAGE.blendHistory, JSON.stringify(history.filter((blend) => !isSampleBlend(blend))));
+    localStorage.setItem(STORAGE.blendHistory, JSON.stringify(dedupeBlendHistory(history.filter((blend) => !isSampleBlend(blend)))));
   } catch {
     // Local blend history is optional.
   }
+}
+
+function dedupeBlendHistory(history) {
+  const seen = new Set();
+  const deduped = [];
+  for (const blend of history) {
+    const keys = blendHistoryKeys(blend);
+    if (keys.some((key) => seen.has(key))) continue;
+    for (const key of keys) seen.add(key);
+    deduped.push(blend);
+  }
+  return deduped;
+}
+
+function blendHistoryKeySet(history) {
+  const keys = new Set();
+  for (const blend of history) {
+    for (const key of blendHistoryKeys(blend)) keys.add(key);
+  }
+  return keys;
+}
+
+function blendHistoryOverlaps(keys, blend) {
+  return blendHistoryKeys(blend).some((key) => keys.has(key));
+}
+
+function blendHistoryKeys(blend) {
+  const keys = [];
+  if (blend?.id) keys.push(`id:${blend.id}`);
+  if (blend?.friendUserId) keys.push(`user:${blend.friendUserId}`);
+  const displayName = basicNormalize(blend?.friendName || "");
+  if (displayName && (!blend?.friendUserId || isPlaceholderHistoryName(blend))) {
+    keys.push(`display:${blend.friendService || "unknown"}:${displayName}`);
+  }
+  return keys.length ? keys : [`unknown:${blend?.matchedAt || ""}:${blend?.matchCount || ""}`];
+}
+
+function isPlaceholderHistoryName(blend) {
+  const service = blend?.friendService || "unknown";
+  const name = cleanDisplay(blend?.friendName || "");
+  return name === `${serviceName(service)} listener`;
 }
 
 function isSampleBlend(blend) {
@@ -2975,6 +3052,7 @@ async function openBlendById(blendId, { navigate = true } = {}) {
     blendId: item.id,
     createdAt: item.matchedAt,
     host: {
+      userId: item.friendUserId || "",
       name: item.friendName,
       service: item.friendService,
       avatarUrl: item.friendAvatarUrl || "",
@@ -3115,6 +3193,69 @@ function restoreAppSnapshot() {
   }
   state.readyToMash = Boolean(snapshot.readyToMash && state.invite && state.session && !state.matches.length);
   state.mashComplete = Boolean(snapshot.mashComplete || state.matches.length);
+}
+
+async function restoreCachedLogin() {
+  const auth = loadPotatunesAuth();
+  state.potatunesAuth = auth;
+  if (!auth?.user?.id || !auth?.user?.provider) return false;
+
+  const cachedAppleName = cleanDisplay(getStoredItem(STORAGE.appleDisplayName));
+  state.session = {
+    service: auth.user.provider,
+    profile: profileFromAuthUser(auth.user),
+    tracks: [],
+  };
+  state.welcomeBack = true;
+
+  if (state.session.service === "apple" && !isPlaceholderAppleName(cachedAppleName)) {
+    state.session.profile.name = cachedAppleName;
+  }
+
+  if (apiBase()) {
+    try {
+      const body = await apiRequest("/api/me", { auth: true });
+      if (body.user) {
+        savePotatunesAuth({ ...auth, user: body.user });
+        state.session.service = body.user.provider;
+        state.session.profile = profileFromAuthUser(body.user);
+      }
+    } catch {
+      removeStoredItem(STORAGE.potatunesAuth);
+      state.potatunesAuth = null;
+      state.session = null;
+      state.welcomeBack = false;
+      return false;
+    }
+
+    if (
+      state.session.service === "apple" &&
+      !isPlaceholderAppleName(cachedAppleName) &&
+      isPlaceholderAppleName(state.session.profile?.name)
+    ) {
+      state.session.profile.name = cachedAppleName;
+      await saveAppleDisplayNameToBackend(cachedAppleName);
+    }
+
+    const snapshot = await fetchLatestLibrarySnapshot({ includeTracks: true }).catch(() => null);
+    if (snapshot?.tracks?.length) {
+      state.session.librarySnapshot = snapshot;
+      state.session.tracks = dedupeTracks(snapshot.tracks.map(trackFromSnapshot));
+    }
+
+    await refreshBlendHistory();
+  }
+
+  return true;
+}
+
+function profileFromAuthUser(user) {
+  return {
+    name: user.displayName || `${serviceName(user.provider)} listener`,
+    id: user.providerUserId || "",
+    avatarUrl: user.avatarUrl || "",
+    url: user.profileUrl || "",
+  };
 }
 
 function compactSnapshotSession(session) {
